@@ -160,6 +160,10 @@ function generateDailyCountSummary() {
     }
   }
 
+
+
+  
+
   if (rowsToAppend.length > 0) {
     summarySheet.getRange(2, 1, rowsToAppend.length, 6).setValues(rowsToAppend);
     summarySheet.getRange(2, 6, rowsToAppend.length, 1).setNumberFormat("0.00%");
