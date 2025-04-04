@@ -124,10 +124,11 @@ function generateWeeklyCountSummary() {
 
 
 
-function onOpen() {
-  const ui = SpreadsheetApp.getUi();
-  ui.createMenu('RTZ Tools')
-    .addItem('Run Weekly & Daily Check', 'checkWeeklyAndDailySubmissions')
-    .addItem('Weekly Counts', 'generateWeeklyCountSummary')
-    .addToUi();
-}
+// function onOpen() {
+//   const ui = SpreadsheetApp.getUi();
+//   ui.createMenu('RTZ Tools')
+//     .addItem('Run Weekly & Daily Check', 'checkWeeklyAndDailySubmissions')
+//     .addItem('Weekly Counts', 'generateWeeklyCountSummary')
+//     .addToUi('Daily Counts', 'generateDailyCountSummary')
+//     .addToUi();
+// }
