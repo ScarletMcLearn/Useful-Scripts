@@ -98,7 +98,7 @@
     btn.title = 'Start/Stop bulk delete';
     btn.setAttribute('aria-pressed', running ? 'true' : 'false');
     btn.addEventListener('click', toggle);
-    toolbar.appendChild(btn);
+    toolbar.appendChild(btn); 
   }
 
   function setUI(runningNow) {
