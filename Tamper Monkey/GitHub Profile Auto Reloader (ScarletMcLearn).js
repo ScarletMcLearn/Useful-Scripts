@@ -4,7 +4,7 @@
 // @version      1.0
 // @description  Adds a Start/Stop button on your GitHub profile to auto-reload with random intervals.
 // @author       You
-// @match        https://github.com/ScarletMcLearn*
+// @match        https://github.com/ScarletMcLearn
 // @grant        GM_getValue
 // @grant        GM_setValue
 // ==/UserScript==
