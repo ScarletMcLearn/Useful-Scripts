@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         GitHub Profile Auto Reloader (ScarletMcLearn) — Keep Alive
+// @name         GitHub Profile Auto Reloader (ScarletMcLearn) — Keep Alive (Profile Only)
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
-// @description  Start/Stop auto-reload on your GitHub profile with counter + robust keep-alive (audio + worker + beacon + scroll nudge + optional wake lock) to reduce Edge tab throttling.
+// @version      2.0.1
+// @description  Start/Stop auto-reload ONLY on https://github.com/ScarletMcLearn (no other GitHub pages), with counter + keep-alive (audio + worker + beacon + scroll nudge + optional wake lock).
 // @author       You
-// @match        https://github.com/ScarletMcLearn*
+// @match        https://github.com/ScarletMcLearn
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -15,26 +15,33 @@
 (function () {
   'use strict';
 
+  // ✅ HARD GUARD: do nothing unless we are EXACTLY on the page you gave
+  // (If you want to allow ?tab=repositories etc., remove the search/hash checks.)
+  const TARGET_PATHS = new Set(['/ScarletMcLearn', '/ScarletMcLearn/']);
+  const onExactProfilePage =
+    location.hostname === 'github.com' &&
+    TARGET_PATHS.has(location.pathname) &&
+    location.search === '' &&
+    location.hash === '';
+
+  if (!onExactProfilePage) return;
+
   const s = 1000;
 
   const CFG = {
-    // Reload interval (random)
     MIN_SECONDS: 5,
     MAX_SECONDS: 10,
 
-    // Keep-alive knobs (like your Yahoo script)
-    USE_AUDIO: true,           // WebAudio oscillator or <audio> fallback
-    USE_WORKER_TICK: true,     // background worker heartbeat
-    USE_BEACON: true,          // sendBeacon ping
-    USE_SCROLL_NUDGE: true,    // 1px scroll toggle
-    USE_WAKE_LOCK: true,       // screen wake lock (visible tabs only, if supported)
+    USE_AUDIO: true,
+    USE_WORKER_TICK: true,
+    USE_BEACON: true,
+    USE_SCROLL_NUDGE: true,
+    USE_WAKE_LOCK: true,
 
     KEEPALIVE_PING_MS: 60_000,
     WORKER_TICK_MS: 10_000,
 
-    // Reload drift guard (helps when timers get throttled)
     DRIFT_CHECK_MS: 1500,
-
     LOG_DEBUG: true
   };
 
@@ -57,7 +64,6 @@
   let wakeLock = null;
   let audioCtx = null, gain = null, osc = null, audioTag = null;
 
-  // ---------- Styles ----------
   GM_addStyle(`
     #smc-auto-reload-btn {
       position: fixed;
@@ -75,7 +81,6 @@
     #smc-auto-reload-btn:hover { opacity: .92; }
   `);
 
-  // ---------- Storage ----------
   function getActive() { return GM_getValue(STORAGE_ACTIVE_KEY, false); }
   function setActive(val) { GM_setValue(STORAGE_ACTIVE_KEY, !!val); }
 
@@ -85,24 +90,22 @@
   function getNextAt() { return GM_getValue(STORAGE_NEXT_AT_KEY, 0); }
   function setNextAt(val) { GM_setValue(STORAGE_NEXT_AT_KEY, Number(val) || 0); }
 
-  // ---------- Keep-alive helpers ----------
+  // ---------- Keep-alive ----------
   async function startAudio() {
     if (!CFG.USE_AUDIO) return;
     try {
       if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       await audioCtx.resume();
-
       if (!osc) {
         gain = audioCtx.createGain();
-        gain.gain.value = 0.001; // not muted, but extremely quiet
+        gain.gain.value = 0.001;
         osc = audioCtx.createOscillator();
-        osc.frequency.value = 1; // 1Hz
+        osc.frequency.value = 1;
         osc.connect(gain).connect(audioCtx.destination);
         osc.start();
         LOG.d('audio keep-alive started (webaudio)');
       }
-    } catch (e) {
-      // fallback: silent wav in <audio> (still non-muted)
+    } catch {
       const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=';
       try {
         if (!audioTag) {
@@ -113,7 +116,7 @@
         await audioTag.play();
         LOG.d('audio keep-alive started (audio tag)');
       } catch {
-        LOG.w('audio keep-alive failed (blocked by browser?)');
+        LOG.w('audio keep-alive failed (blocked?)');
       }
     }
   }
@@ -138,17 +141,14 @@
   function workerStart() {
     if (!CFG.USE_WORKER_TICK) return;
     workerStop();
-
     try {
       const src = `setInterval(()=>postMessage(Date.now()), ${CFG.WORKER_TICK_MS});`;
       worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
       worker.onmessage = () => {
-        // gentle activity pulses
         try {
           document.body?.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 1, clientY: 1 }));
           window.dispatchEvent(new Event('scroll', { bubbles: true }));
           nudgeScroll();
-          // also drift-check reload timing when we get a tick
           maybeReloadIfOverdue();
         } catch {}
       };
@@ -165,11 +165,8 @@
 
   function pingerStart() {
     if (!CFG.USE_BEACON) return;
-    // fire and forget; not trying to keep tab alive by itself, just adds activity
     setInterval(() => {
-      try {
-        navigator.sendBeacon?.('/favicon.ico', new Blob(['k']));
-      } catch {}
+      try { navigator.sendBeacon?.('/favicon.ico', new Blob(['k'])); } catch {}
     }, CFG.KEEPALIVE_PING_MS);
     LOG.d('beacon pinger scheduled');
   }
@@ -184,7 +181,6 @@
       wakeLock.addEventListener?.('release', () => LOG.d('wake lock released'));
       LOG.d('wake lock acquired');
     } catch {
-      // ignore (not supported/denied)
       LOG.d('wake lock not available/denied');
     }
   }
@@ -195,7 +191,6 @@
   }
 
   function startKeepAlive() {
-    // Start ONLY when user clicks Start (gesture) or when active reload brings you back
     startAudio();
     workerStart();
     pingerStart();
@@ -210,36 +205,25 @@
 
   document.addEventListener('visibilitychange', () => {
     if (!getActive()) return;
-
     if (!document.hidden) {
-      // re-acquire on tab return
       acquireWakeLock();
       startAudio();
-      // and run a drift-check immediately
       maybeReloadIfOverdue();
     }
   });
 
   // ---------- Reload scheduling ----------
   function computeDelayMs() {
-    const min = CFG.MIN_SECONDS;
-    const max = CFG.MAX_SECONDS;
-    const delaySeconds = min + Math.random() * (max - min);
+    const delaySeconds = CFG.MIN_SECONDS + Math.random() * (CFG.MAX_SECONDS - CFG.MIN_SECONDS);
     return Math.round(delaySeconds * 1000);
   }
 
-  function safeReload() {
-    // If you ever want to “soft refresh” a section instead, this is where you’d change behavior.
-    window.location.reload();
-  }
+  function safeReload() { window.location.reload(); }
 
   function maybeReloadIfOverdue() {
     if (!getActive()) return;
     const nextAt = getNextAt();
-    if (!nextAt) return;
-
-    // If throttling delayed timers, force reload once we're overdue
-    if (Date.now() >= nextAt) {
+    if (nextAt && Date.now() >= nextAt) {
       LOG.d('overdue -> forcing reload now');
       safeReload();
     }
@@ -251,11 +235,8 @@
     setNextAt(nextAt);
 
     clearTimeout(reloadTimerId);
-    reloadTimerId = setTimeout(() => {
-      safeReload();
-    }, delayMs);
+    reloadTimerId = setTimeout(safeReload, delayMs);
 
-    // Drift guard (helps when background throttling pauses setTimeout)
     clearInterval(driftTimerId);
     driftTimerId = setInterval(maybeReloadIfOverdue, CFG.DRIFT_CHECK_MS);
 
@@ -266,7 +247,6 @@
   function updateButtonLabel(btn) {
     const active = getActive();
     const counter = getCounter();
-
     if (active) {
       btn.textContent = `Stop | Counter = ${counter}`;
       btn.style.backgroundColor = '#c93c3c';
@@ -289,27 +269,18 @@
 
   function startAll(btn) {
     setActive(true);
-
-    // set counter to 1 on manual start
     setCounter(1);
     updateButtonLabel(btn);
-
-    startKeepAlive();   // user gesture happens here
+    startKeepAlive();     // user gesture is the Start click
     scheduleReload();
-
     LOG.i('started');
   }
 
   function onButtonClick() {
     const btn = document.getElementById('smc-auto-reload-btn');
     if (!btn) return;
-
-    const active = getActive();
-    if (!active) startAll(btn);
-    else {
-      stopAll();
-      updateButtonLabel(btn);
-    }
+    if (!getActive()) startAll(btn);
+    else { stopAll(); updateButtonLabel(btn); }
   }
 
   function createButton() {
@@ -321,28 +292,19 @@
     btn.textContent = 'Start';
     btn.addEventListener('click', onButtonClick);
 
-    document.addEventListener('DOMContentLoaded', () => {
-      document.body.appendChild(btn);
-    }, { once: true });
-
-    // If body already exists
     if (document.body) document.body.appendChild(btn);
+    else document.addEventListener('DOMContentLoaded', () => document.body.appendChild(btn), { once: true });
 
     return btn;
   }
 
-  // ---------- Init ----------
   function init() {
     const btn = createButton();
 
     if (getActive()) {
-      // We arrived due to an active auto-reload cycle
       const current = getCounter();
       setCounter((current > 0 ? current : 0) + 1);
-
       updateButtonLabel(btn);
-
-      // Keep-alive should re-start on load
       startKeepAlive();
       scheduleReload();
       LOG.d('resumed active session');
@@ -352,7 +314,6 @@
     }
   }
 
-  // Menu shortcuts
   GM_registerMenuCommand('Start auto-reload', () => {
     const btn = createButton();
     if (!getActive()) startAll(btn);
