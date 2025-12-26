@@ -1,11 +1,12 @@
 // ==UserScript==
-// @name         AGT - Standup Missing Sync (Toggle Start/Pause/Resume + Auto-submit + Daily BD Midnight)
+// @name         AGT - Standup Missing Sync (Auto-fill + Auto-submit + KeepAlive + Daily BD Midnight)
 // @namespace    https://allgentech.io/
 // @version      2.1.0
-// @description  /employee: detects missing daily standup dates. Single toggle button: Start -> Pause -> Resume (SHIFT+Click = Stop). When running, auto-checks daily at 12:00 AM Bangladesh time (tab must be open; otherwise runs next time you open /employee). /standup-form runner fills+submits for each missing date except excluded.
-// @match        https://allgentech.io/employee*
+// @description  /employee: detects missing daily standup dates, Start/Pause toggle. When running: processes ALL (fills+submits) except excluded. Optional auto-daily at 12:00 AM Bangladesh time with refresh + keep-alive (audio + worker + beacon + scroll nudge + wake lock).
+// @match        https://allgentech.io/employee
+// @match        https://allgentech.io/employee/
 // @match        https://allgentech.io/employee/standup-form*
-// @run-at       document-idle
+// @run-at       document-start
 // @grant        none
 // ==/UserScript==
 
@@ -14,7 +15,30 @@
 
   const STORE_KEY = "agt_standup_sync_v2_1";
   const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000; // UTC+6 (Bangladesh)
-  const RUNNER_FLAG_KEY = "agt_standup_runner_tab";
+
+  // -------------------------
+  // Keep Alive config (similar to your GitHub script)
+  // -------------------------
+  const KA_CFG = {
+    USE_AUDIO: true,
+    USE_WORKER_TICK: true,
+    USE_BEACON: true,
+    USE_SCROLL_NUDGE: true,
+    USE_WAKE_LOCK: true,
+
+    WORKER_TICK_MS: 10_000,
+    BEACON_PING_MS: 60_000,
+    DRIFT_CHECK_MS: 1500,
+
+    LOG_DEBUG: false,
+  };
+
+  const LOG = {
+    d: (...a) => KA_CFG.LOG_DEBUG && console.log("[agt-standup]", ...a),
+    i: (...a) => console.log("[agt-standup]", ...a),
+    w: (...a) => console.warn("[agt-standup]", ...a),
+    e: (...a) => console.error("[agt-standup]", ...a),
+  };
 
   // -------------------------
   // Utils
@@ -24,10 +48,9 @@
   const $all = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
   async function ensureBody() {
-    if (document.body) return;
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 200; i++) {
       if (document.body) return;
-      await sleep(50);
+      await sleep(25);
     }
   }
 
@@ -126,17 +149,18 @@
     return `${m[1]}-${pad2(mo)}-${pad2(d)}`;
   }
 
-  function mdyToISO(m, d, y) {
-    return normalizeISODate(`${y}-${pad2(m)}-${pad2(d)}`);
-  }
-  function dmyToISO(d, m, y) {
-    return normalizeISODate(`${y}-${pad2(m)}-${pad2(d)}`);
-  }
-
   function yearFrom2Digits(yy) {
     const n = Number(yy);
     if (!Number.isFinite(n)) return null;
     return n <= 69 ? 2000 + n : 1900 + n;
+  }
+
+  function mdyToISO(m, d, y) {
+    return normalizeISODate(`${y}-${pad2(m)}-${pad2(d)}`);
+  }
+
+  function dmyToISO(d, m, y) {
+    return normalizeISODate(`${y}-${pad2(m)}-${pad2(d)}`);
   }
 
   function uniqSortedISO(dates) {
@@ -158,27 +182,33 @@
     return uniqSortedISO(iso);
   }
 
-  // Exclude parser supports:
-  // - ISO (YYYY-MM-DD) even embedded in junk: "r 2025-12-25."
-  // - dd-mm-yy, mm-dd-yy, dd-mm-yyyy, mm-dd-yyyy (also "/")
+  /**
+   * Exclude dates parser:
+   * Accepts:
+   *  - ISO: YYYY-MM-DD (also YYYY-M-D)
+   *  - dd-mm-yy, mm-dd-yy, dd-mm-yyyy, mm-dd-yyyy (also "/")
+   * Also extracts ISO embedded in text like "r 2025-12-25."
+   */
   function parseExcludeDatesToSet(raw) {
     const set = new Set();
-
     const parts = String(raw || "")
       .split(/[\s,]+/)
       .map((s) => s.trim())
       .filter(Boolean);
 
     for (const part of parts) {
+      // direct ISO
       const directIso = normalizeISOLoose(part) || normalizeISODate(part);
       if (directIso) { set.add(directIso); continue; }
 
+      // ISO embedded in junk
       const embedded = part.match(/(\d{4}-\d{1,2}-\d{1,2})/);
       if (embedded) {
         const iso = normalizeISOLoose(embedded[1]) || normalizeISODate(embedded[1]);
         if (iso) { set.add(iso); continue; }
       }
 
+      // dd-mm-yy / mm-dd-yy / dd-mm-yyyy / mm-dd-yyyy
       const m = part.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{2}|\d{4})$/);
       if (!m) continue;
 
@@ -191,7 +221,7 @@
       let iso = null;
       if (a > 12 && b <= 12) iso = dmyToISO(a, b, year);
       else if (b > 12 && a <= 12) iso = mdyToISO(a, b, year);
-      else iso = mdyToISO(a, b, year) || dmyToISO(a, b, year); // ambiguous -> MM-DD first
+      else iso = mdyToISO(a, b, year) || dmyToISO(a, b, year);
 
       if (iso) set.add(iso);
     }
@@ -223,14 +253,15 @@ Help Team with Automation;`;
       blockers: "No",
       workStatus: "Good",
       excludeDates: "",
-      autoSubmit: true,   // you asked for submit now
-      autoDaily: true,    // you asked for daily checks
-      autoRunIfMissing: true
+
+      autoSubmit: true,        // you asked for submit in sync mode
+      autoDaily: true,         // you asked for daily midnight checks
+      autoRunIfMissing: true,  // when daily check finds missing → run
     };
   }
 
   // -------------------------
-  // Missing date extraction
+  // Extract missing dates from /employee Pending Tasks DOM
   // -------------------------
   function extractMissingStandupDatesFromEmployeePage() {
     const lis = $all("li");
@@ -259,7 +290,179 @@ Help Team with Automation;`;
   }
 
   // -------------------------
-  // Standup form filling + submit
+  // Keep Alive (audio + worker + beacon + scroll + wake lock + drift checks)
+  // -------------------------
+  const KeepAlive = (() => {
+    let worker = null;
+    let wakeLock = null;
+    let audioCtx = null, gain = null, osc = null, audioTag = null;
+    let beaconTimer = null;
+    let driftTimer = null;
+    let running = false;
+
+    const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
+
+    function nudgeScroll() {
+      if (!KA_CFG.USE_SCROLL_NUDGE) return;
+      try {
+        const el = document.scrollingElement || document.documentElement;
+        const y = el.scrollTop;
+        el.scrollTop = y + 1;
+        el.scrollTop = y;
+      } catch {}
+    }
+
+    async function startAudio() {
+      if (!KA_CFG.USE_AUDIO) return;
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        await audioCtx.resume();
+        if (!osc) {
+          gain = audioCtx.createGain();
+          gain.gain.value = 0.001;
+          osc = audioCtx.createOscillator();
+          osc.frequency.value = 1;
+          osc.connect(gain).connect(audioCtx.destination);
+          osc.start();
+          LOG.d("keepalive audio (webaudio) started");
+        }
+      } catch {
+        try {
+          if (!audioTag) {
+            audioTag = new Audio(SILENT_WAV);
+            audioTag.loop = true;
+            audioTag.volume = 0.01;
+          }
+          await audioTag.play();
+          LOG.d("keepalive audio (tag) started");
+        } catch {
+          // Most browsers require a user gesture; we'll just fail silently.
+          LOG.d("keepalive audio blocked (no user gesture?)");
+        }
+      }
+    }
+
+    function stopAudio() {
+      try { osc?.stop(); } catch {}
+      try { audioCtx?.close(); } catch {}
+      try { audioTag?.pause(); } catch {}
+      osc = gain = audioCtx = audioTag = null;
+    }
+
+    async function acquireWakeLock() {
+      if (!KA_CFG.USE_WAKE_LOCK) return;
+      if (!("wakeLock" in navigator)) return;
+      if (document.hidden) return;
+
+      try {
+        wakeLock = await navigator.wakeLock.request("screen");
+        wakeLock.addEventListener?.("release", () => LOG.d("wake lock released"));
+        LOG.d("wake lock acquired");
+      } catch {
+        LOG.d("wake lock denied/unavailable");
+      }
+    }
+
+    function releaseWakeLock() {
+      try { wakeLock?.release(); } catch {}
+      wakeLock = null;
+    }
+
+    function startWorker(onTick) {
+      if (!KA_CFG.USE_WORKER_TICK) return;
+      stopWorker();
+      try {
+        const src = `setInterval(()=>postMessage(Date.now()), ${KA_CFG.WORKER_TICK_MS});`;
+        worker = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+        worker.onmessage = () => {
+          try {
+            document.body?.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 1, clientY: 1 }));
+            window.dispatchEvent(new Event("scroll", { bubbles: true }));
+            nudgeScroll();
+            onTick?.();
+          } catch {}
+        };
+        LOG.d("keepalive worker started");
+      } catch {
+        LOG.d("keepalive worker failed");
+      }
+    }
+
+    function stopWorker() {
+      try { worker?.terminate(); } catch {}
+      worker = null;
+    }
+
+    function startBeacon() {
+      if (!KA_CFG.USE_BEACON) return;
+      stopBeacon();
+      beaconTimer = setInterval(() => {
+        try { navigator.sendBeacon?.("/favicon.ico", new Blob(["k"])); } catch {}
+      }, KA_CFG.BEACON_PING_MS);
+      LOG.d("keepalive beacon started");
+    }
+
+    function stopBeacon() {
+      if (beaconTimer) clearInterval(beaconTimer);
+      beaconTimer = null;
+    }
+
+    function startDriftCheck(onTick) {
+      stopDriftCheck();
+      driftTimer = setInterval(() => {
+        try { onTick?.(); } catch {}
+      }, KA_CFG.DRIFT_CHECK_MS);
+    }
+
+    function stopDriftCheck() {
+      if (driftTimer) clearInterval(driftTimer);
+      driftTimer = null;
+    }
+
+    function start(onTick) {
+      if (running) return;
+      running = true;
+
+      // Best effort: audio + wake lock work best after user click
+      startAudio();
+      if (!document.hidden) acquireWakeLock();
+
+      startWorker(onTick);
+      startBeacon();
+      startDriftCheck(onTick);
+
+      document.addEventListener("visibilitychange", onVis, true);
+      LOG.d("keepalive ON");
+    }
+
+    function onVis() {
+      if (!running) return;
+      if (!document.hidden) {
+        acquireWakeLock();
+        startAudio();
+      }
+    }
+
+    function stop() {
+      if (!running) return;
+      running = false;
+
+      document.removeEventListener("visibilitychange", onVis, true);
+      stopWorker();
+      stopBeacon();
+      stopDriftCheck();
+      stopAudio();
+      releaseWakeLock();
+      LOG.d("keepalive OFF");
+    }
+
+    function isRunning() { return running; }
+
+    return { start, stop, isRunning };
+  })();
+
+  // -------------------------
+  // Standup form fill + submit
   // -------------------------
   function buildYesterdayWithAchievements(yesterday, achievements) {
     const y = String(yesterday || "").trim();
@@ -273,9 +476,7 @@ Help Team with Automation;`;
     return normalizeISODate(url.searchParams.get("autoFillDate"));
   }
 
-  async function fillStandupForm(payload, dateToUse, setStatus) {
-    setStatus(`Filling form for: ${dateToUse}`);
-
+  async function fillStandupForm(payload, dateToUse) {
     const form = await waitFor(() => document.querySelector("form"), 15000);
     if (!form) throw new Error("Could not find the standup form <form>.");
 
@@ -285,7 +486,6 @@ Help Team with Automation;`;
       15000
     );
     if (!dateInput) throw new Error("Could not find the Date input.");
-
     setNativeValue(dateInput, dateToUse);
 
     const yTa = form.querySelector('textarea[placeholder="What did you do yesterday?"]');
@@ -308,7 +508,6 @@ Help Team with Automation;`;
       const opts = $all("option", s).map((o) => (o.value || o.textContent || "").trim());
       return opts.includes("No") && opts.includes("Yes");
     });
-
     if (blockersSelect) {
       const b = String(payload.blockers || "").trim().toLowerCase();
       setNativeValue(blockersSelect, b === "no" ? "No" : "Yes");
@@ -323,58 +522,48 @@ Help Team with Automation;`;
       await sleep(80);
     }
 
-    setStatus(`Filled fields for ${dateToUse}.`);
     return { form };
   }
 
-  async function submitStandupForm(form, setStatus) {
+  async function submitStandupForm(form) {
     const submitBtn = form.querySelector('button[type="submit"]');
     if (!submitBtn) throw new Error("Could not find Submit button.");
-
-    setStatus("Submitting...");
     submitBtn.click();
 
-    await sleep(800); // give it a moment
-    setStatus("Submit clicked. (Continuing…)");
-
-    // If app navigates away after submit, that’s fine.
+    // Best-effort: wait for navigation or button disable/state change
+    await waitFor(() => {
+      const btn = form.querySelector('button[type="submit"]');
+      if (!btn) return true;
+      if (btn.disabled) return true;
+      if (location.pathname.replace(/\/+$/, "") !== "/employee/standup-form") return true;
+      return false;
+    }, 12000, 200);
   }
 
   // -------------------------
-  // Sync state helpers
+  // Sync runner (queue)
   // -------------------------
   function newRunId() {
     return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  function getState() {
-    const s = loadState();
-    s.payload = s.payload || getDefaultTexts();
-    s.sync = s.sync || {};
-    if (!s.sync.mode) s.sync.mode = "stopped"; // stopped | running | paused
-    return s;
+  function getSyncState() {
+    const state = loadState();
+    state.payload = state.payload || getDefaultTexts();
+    state.sync = state.sync || {};
+    state.ui = state.ui || {};
+    return state;
   }
 
-  function setState(mutator) {
-    const s = getState();
-    const next = mutator(s) || s;
+  function setSyncState(updater) {
+    const st = getSyncState();
+    const next = updater(st) || st;
     saveState(next);
     return next;
   }
 
-  function isStopRequested() {
-    return !!getState().sync?.stopRequested;
-  }
-
-  function isPauseRequested() {
-    return !!getState().sync?.pauseRequested;
-  }
-
-  // -------------------------
-  // Run queue start
-  // -------------------------
-  async function startRunFromEmployeePage(setStatus, datesTextOverride = null) {
-    const st = getState();
+  function computeQueueFromEmployeePage(datesTextOverride = null) {
+    const st = getSyncState();
     const payload = st.payload || getDefaultTexts();
 
     const detected = extractMissingStandupDatesFromEmployeePage();
@@ -384,29 +573,34 @@ Help Team with Automation;`;
     const excludeSet = parseExcludeDatesToSet(payload.excludeDates);
     const queue = merged.filter((d) => !excludeSet.has(d));
 
+    return { detected, manual, merged, excludeSet, queue, payload };
+  }
+
+  async function startRunFromEmployeePage(setStatus, datesTextOverride = null) {
+    const { detected, manual, merged, excludeSet, queue, payload } = computeQueueFromEmployeePage(datesTextOverride);
+
     if (!queue.length) {
       setStatus(
         `No runnable dates.\nDetected: ${detected.length}\nManual list: ${manual.length}\n` +
         `Excluded removed: ${merged.length - queue.length}\n\nNothing to sync.`
       );
-      // keep mode running if user started it; daily may find later
       return;
     }
 
     const runId = newRunId();
 
-    setState((s) => {
+    setSyncState((s) => {
       s.datesText = (datesTextOverride ?? s.datesText ?? merged.join(", "));
       s.payload = payload;
+
       s.sync = {
-        ...s.sync,
         inProgress: true,
         runId,
         queue,
         index: 0,
         startedAt: Date.now(),
         stopRequested: false,
-        pauseRequested: false, // start fresh
+        lastRunSummary: null,
       };
       return s;
     });
@@ -414,6 +608,7 @@ Help Team with Automation;`;
     const first = queue[0];
     const url = `https://allgentech.io/employee/standup-form?autoFillDate=${encodeURIComponent(first)}&runId=${encodeURIComponent(runId)}&auto=1`;
 
+    // Try new tab (preferred). If blocked, run in same tab.
     const w = window.open(url, "_blank");
     if (!w) {
       setStatus("Popup blocked. Running in THIS tab instead...");
@@ -422,15 +617,13 @@ Help Team with Automation;`;
     }
 
     setStatus(
-      `✅ Sync started.\nTotal dates: ${queue.length}\n` +
+      `Started sync.\nTotal dates: ${queue.length}\n` +
       `Auto submit: ${payload.autoSubmit ? "ON" : "OFF"}\n` +
-      `Runner opened for: ${first}`
+      `Runner tab opened for: ${first}\n` +
+      `Exclude list count: ${excludeSet.size}`
     );
   }
 
-  // -------------------------
-  // Runner step on standup-form
-  // -------------------------
   async function runStepOnStandupForm(setStatus) {
     const url = new URL(location.href);
     const runId = url.searchParams.get("runId");
@@ -438,9 +631,10 @@ Help Team with Automation;`;
     const dateToUse = resolveAutoDateFromQuery();
     if (!isAuto || !runId || !dateToUse) return;
 
-    sessionStorage.setItem(RUNNER_FLAG_KEY, "1");
+    // KeepAlive in runner tab too (best-effort)
+    KeepAlive.start(() => { /* just keeping alive */ });
 
-    const st = getState();
+    const st = getSyncState();
     const payload = st.payload || getDefaultTexts();
     const sync = st.sync || {};
 
@@ -449,11 +643,12 @@ Help Team with Automation;`;
       return;
     }
 
+    // Stop request?
     if (sync.stopRequested) {
-      setStatus("🛑 Stop requested. Ending run & returning to /employee …");
-      setState((s) => {
+      setStatus("🛑 Stop requested. Ending run and returning to /employee.");
+      setSyncState((s) => {
         s.sync.inProgress = false;
-        s.sync.mode = "stopped";
+        s.sync.lastRunSummary = { stopped: true, at: Date.now() };
         return s;
       });
       await sleep(400);
@@ -461,50 +656,24 @@ Help Team with Automation;`;
       return;
     }
 
-    // Exclude check (live)
+    // Respect exclusions (in case changed mid-run)
     const excludeSet = parseExcludeDatesToSet(payload.excludeDates);
     if (excludeSet.has(dateToUse)) {
       setStatus(`⏭️ Skipped excluded date: ${dateToUse}`);
     } else {
-      const { form } = await fillStandupForm(payload, dateToUse, setStatus);
+      setStatus(`Processing: ${dateToUse}\nFill + ${payload.autoSubmit ? "Submit" : "No Submit"}`);
+      const { form } = await fillStandupForm(payload, dateToUse);
+
       if (payload.autoSubmit) {
-        await submitStandupForm(form, setStatus);
+        await submitStandupForm(form);
+        setStatus(`✅ Submitted: ${dateToUse}`);
       } else {
-        setStatus(`Filled ${dateToUse}. Auto submit is OFF (not submitting).`);
+        setStatus(`✅ Filled (not submitted): ${dateToUse}`);
       }
     }
 
-    // If pause requested, STOP HERE and wait until resumed/stopped
-    if (isPauseRequested()) {
-      setStatus(
-        `⏸️ Paused after processing: ${dateToUse}\n\n` +
-        `Go to /employee and press Resume.\n` +
-        `SHIFT+Click toggle to Stop.`
-      );
-
-      while (true) {
-        await sleep(500);
-        const cur = getState();
-        if (cur.sync?.stopRequested) {
-          setStatus("🛑 Stop requested while paused. Returning to /employee …");
-          setState((s) => {
-            s.sync.inProgress = false;
-            s.sync.mode = "stopped";
-            return s;
-          });
-          await sleep(300);
-          location.href = "https://allgentech.io/employee";
-          return;
-        }
-        if (!cur.sync?.pauseRequested && cur.sync?.mode === "running") {
-          break; // resume
-        }
-      }
-      setStatus("▶️ Resumed. Continuing…");
-    }
-
-    // Advance queue
-    const next = setState((s) => {
+    // Advance
+    const next = setSyncState((s) => {
       if (!s.sync || s.sync.runId !== runId) return s;
       s.sync.index = (s.sync.index || 0) + 1;
       return s;
@@ -515,24 +684,26 @@ Help Team with Automation;`;
 
     if (idx >= q.length) {
       setStatus("✅ All dates processed. Returning to /employee …");
-
-      setState((s) => {
+      setSyncState((s) => {
         s.sync.inProgress = false;
-        // IMPORTANT: keep mode as-is (running continues daily checks unless user stops)
         s.sync.completedAt = Date.now();
+        s.sync.lastRunSummary = {
+          completed: true,
+          total: q.length,
+          autoSubmit: !!payload.autoSubmit,
+          finishedAt: Date.now(),
+        };
         return s;
       });
-
-      await sleep(600);
+      await sleep(500);
       location.href = "https://allgentech.io/employee";
       return;
     }
 
     const nextDate = q[idx];
     setStatus(`Continuing… (${idx + 1}/${q.length}) Next: ${nextDate}`);
-    await sleep(600);
-    location.href =
-      `https://allgentech.io/employee/standup-form?autoFillDate=${encodeURIComponent(nextDate)}&runId=${encodeURIComponent(runId)}&auto=1`;
+    await sleep(500);
+    location.href = `https://allgentech.io/employee/standup-form?autoFillDate=${encodeURIComponent(nextDate)}&runId=${encodeURIComponent(runId)}&auto=1`;
   }
 
   // -------------------------
@@ -567,13 +738,11 @@ Help Team with Automation;`;
           <div data-employee-only style="display:none;">
             <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
               <button data-act="scan" style="padding:8px 10px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:#ffffff;cursor:pointer;font-weight:800;font-size:13px;">Scan</button>
-              <button data-act="syncToggle" style="flex:1;padding:8px 10px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:#111827;color:#fff;cursor:pointer;font-weight:900;font-size:13px;">
-                Start Sync
-              </button>
-            </div>
 
-            <div style="font-size:12px;color:rgba(17,24,39,0.75);margin:-4px 0 10px 0;">
-              Toggle behavior: <b>Start → Pause → Resume</b>. <b>SHIFT+Click</b> the same button to <b>Stop/Reset</b>.
+              <button data-act="syncToggle" style="flex:1;padding:8px 10px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:#111827;color:#fff;cursor:pointer;font-weight:900;font-size:13px;">Start Sync</button>
+
+              <button data-act="hardStop" title="Fully stop + clear running state"
+                style="padding:8px 10px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:#fff;color:#b91c1c;cursor:pointer;font-weight:900;font-size:13px;">Stop</button>
             </div>
 
             <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:8px;">
@@ -583,12 +752,12 @@ Help Team with Automation;`;
 
             <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:8px;">
               <input data-field="autoDaily" type="checkbox">
-              Daily check @ 12:00 AM Bangladesh time (tab must remain open; otherwise runs next time you open /employee)
+              Auto daily check @ 12:00 AM Bangladesh time (best-effort; requires browser open)
             </label>
 
             <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:10px;">
               <input data-field="autoRunIfMissing" type="checkbox">
-              If daily check finds missing dates → auto-run sync
+              If auto-daily finds missing → automatically run sync
             </label>
 
             <label style="display:flex;flex-direction:column;gap:6px;font-size:12px;margin-bottom:10px;">
@@ -649,8 +818,8 @@ Help Team with Automation;`;
             </label>
 
             <label style="display:flex;flex-direction:column;gap:6px;font-size:12px;">
-              Exclude dates (comma/space separated). Supports ISO too (e.g. 2025-12-25). Also accepts dd-mm-yy/mm-dd-yyyy etc.
-              <textarea data-field="excludeDates" rows="2" placeholder="e.g. 2025-12-25, 25-12-24, 12-31-2024"
+              Exclude dates (comma/space separated). Accepts ISO too (e.g. r 2025-12-25.)
+              <textarea data-field="excludeDates" rows="2" placeholder="e.g. 25-12-24, 12-31-2024, 2025-12-25"
                 style="resize:vertical;padding:8px 10px;border:1px solid rgba(0,0,0,0.18);border-radius:10px;font-size:12px;line-height:1.35;"></textarea>
             </label>
 
@@ -659,7 +828,7 @@ Help Team with Automation;`;
               <button data-act="fillOnlyHere" style="padding:8px 10px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:#111827;color:#fff;cursor:pointer;font-weight:900;font-size:13px;">Fill Here (test)</button>
             </div>
 
-            <div data-status style="margin-top:2px;padding:8px 10px;border-radius:10px;background: rgba(17,24,39,0.06);font-size:12px;line-height:1.35;white-space: pre-wrap;min-height:110px;">Ready.</div>
+            <div data-status style="margin-top:2px;padding:8px 10px;border-radius:10px;background: rgba(17,24,39,0.06);font-size:12px;line-height:1.35;white-space: pre-wrap;min-height:120px;">Ready.</div>
           </div>
         </div>
       </div>
@@ -672,7 +841,7 @@ Help Team with Automation;`;
     const pill = root.querySelector("[data-pill]");
     const statusEl = root.querySelector("[data-status]");
     const employeeOnly = root.querySelector("[data-employee-only]");
-    const toggleBtn = root.querySelector('button[data-act="syncToggle"]');
+    const syncBtn = root.querySelector('button[data-act="syncToggle"]');
 
     const setStatus = (msg) => (statusEl.textContent = msg);
     const setPill = (msg) => (pill.textContent = msg);
@@ -729,9 +898,9 @@ Help Team with Automation;`;
       f.workStatus.value = x.workStatus ?? def.workStatus;
       f.excludeDates.value = x.excludeDates ?? def.excludeDates;
 
-      f.autoSubmit.checked = x.autoSubmit ?? true;
-      f.autoDaily.checked = x.autoDaily ?? true;
-      f.autoRunIfMissing.checked = x.autoRunIfMissing ?? true;
+      f.autoSubmit.checked = x.autoSubmit ?? def.autoSubmit;
+      f.autoDaily.checked = x.autoDaily ?? def.autoDaily;
+      f.autoRunIfMissing.checked = x.autoRunIfMissing ?? def.autoRunIfMissing;
     }
 
     function toggleBody(forceOpen = null) {
@@ -743,38 +912,6 @@ Help Team with Automation;`;
       btn.title = nextOpen ? "Minimize" : "Expand";
     }
 
-    function syncButtonUiFromState() {
-      const st = getState();
-      const mode = st.sync?.mode || "stopped"; // stopped|running|paused
-      const inProg = !!st.sync?.inProgress;
-
-      if (!toggleBtn) return;
-
-      if (mode === "running") {
-        toggleBtn.textContent = "Pause";
-        toggleBtn.style.background = "#111827";
-        toggleBtn.style.color = "#fff";
-      } else if (mode === "paused") {
-        toggleBtn.textContent = "Resume";
-        toggleBtn.style.background = "#2563eb";
-        toggleBtn.style.color = "#fff";
-      } else {
-        toggleBtn.textContent = "Start Sync";
-        toggleBtn.style.background = "#111827";
-        toggleBtn.style.color = "#fff";
-      }
-
-      // pill
-      if (mode === "running") setPill(inProg ? "running…" : "running");
-      if (mode === "paused") setPill("paused");
-      if (mode === "stopped") setPill("stopped");
-    }
-
-    // init state
-    const st = getState();
-    applyPayload(st.payload);
-
-    // expand/collapse
     head.addEventListener("click", (e) => {
       const isBtn = e.target.closest("button");
       if (!isBtn) toggleBody(null);
@@ -784,53 +921,76 @@ Help Team with Automation;`;
       toggleBody(null);
     });
 
-    // employee only setup
+    // init
+    const st = getSyncState();
+    applyPayload(st.payload);
+
+    function refreshSyncButtonLabel() {
+      const s = getSyncState();
+      const enabled = !!s.syncEnabled;
+      const paused = !!s.paused;
+      if (!enabled) {
+        syncBtn.textContent = "Start Sync";
+        syncBtn.style.background = "#111827";
+        return;
+      }
+      if (paused) {
+        syncBtn.textContent = "Resume Sync";
+        syncBtn.style.background = "#065f46";
+      } else {
+        syncBtn.textContent = "Pause Sync";
+        syncBtn.style.background = "#b91c1c";
+      }
+    }
+
+    // Employee-only mode init
     if (mode === "employee") {
       employeeOnly.style.display = "block";
       const detected = extractMissingStandupDatesFromEmployeePage();
       const existingDates = parseISOListFromText(st.datesText || "");
       const merged = uniqSortedISO([...detected, ...existingDates]);
       f.dates.value = merged.join(", ");
-      setState((s) => { s.datesText = f.dates.value; return s; });
+      setPill(`${merged.length} missing`);
+      refreshSyncButtonLabel();
 
       setStatus(
-        `Detected: ${detected.length}\nManual list: ${existingDates.length}\nTotal: ${merged.length}\n\n` +
-        `Next daily check time: ${formatDhakaNextMidnight()}`
+        `Detected missing: ${detected.length}\n` +
+        `Manual list: ${existingDates.length}\n` +
+        `Total list: ${merged.length}\n` +
+        `Next midnight check: ${formatDhakaNextMidnight()}\n` +
+        `KeepAlive: ${KeepAlive.isRunning() ? "ON" : "OFF"}`
       );
-      setPill(`${merged.length} missing`);
+
+      setSyncState((s) => { s.datesText = f.dates.value; return s; });
     } else {
       setPill(mode === "standup-form" ? "runner" : "standup");
-      setStatus("Standup form page. Runner will auto-step if opened with auto=1.");
+      setStatus("Standup form page. Runner will handle auto steps when opened with ?auto=1. Fill Here is test-only.");
     }
 
-    syncButtonUiFromState();
-
-    // autosave payload
+    // autosave
     const autosaveFields = ["yesterday","achievements","today","tomorrow","assigned","tested","bugs","blockers","workStatus","excludeDates","autoSubmit","autoDaily","autoRunIfMissing"];
     for (const k of autosaveFields) {
       const el = f[k];
       const evt = el.type === "checkbox" ? "change" : "input";
       el.addEventListener(evt, () => {
-        setState((s) => {
-          s.payload = buildPayload();
-          if (f.dates) s.datesText = f.dates.value;
-          return s;
-        });
+        const prev = getSyncState();
+        prev.payload = buildPayload();
+        if (f.dates) prev.datesText = f.dates.value;
+        saveState(prev);
       });
     }
 
-    // action clicks
+    // actions
     root.addEventListener("click", async (e) => {
       const btn = e.target.closest("button");
       if (!btn) return;
       const act = btn.getAttribute("data-act");
 
       if (act === "save") {
-        setState((s) => {
-          s.payload = buildPayload();
-          if (f.dates) s.datesText = f.dates.value;
-          return s;
-        });
+        const prev = getSyncState();
+        prev.payload = buildPayload();
+        if (f.dates) prev.datesText = f.dates.value;
+        saveState(prev);
         setStatus("✅ Saved defaults.");
         return;
       }
@@ -841,98 +1001,69 @@ Help Team with Automation;`;
         const merged = uniqSortedISO([...detected, ...manual]);
         f.dates.value = merged.join(", ");
         setPill(`${merged.length} missing`);
-
-        setState((s) => { s.datesText = f.dates.value; return s; });
-
-        setStatus(
-          `✅ Scan complete\nDetected: ${detected.length}\nMerged total: ${merged.length}\n\n` +
-          `Next daily check time: ${formatDhakaNextMidnight()}`
-        );
+        setSyncState((s) => { s.datesText = f.dates.value; return s; });
+        setStatus(`✅ Scan complete\nDetected: ${detected.length}\nTotal list: ${merged.length}\nNext midnight: ${formatDhakaNextMidnight()}`);
         return;
       }
 
-      // MAIN TOGGLE
       if (act === "syncToggle") {
-        if (location.pathname.replace(/\/+$/, "") !== "/employee") {
-          setStatus("This toggle only controls sync from /employee.");
-          return;
-        }
+        // user gesture: best time to start audio + wake lock
+        const st0 = getSyncState();
+        st0.payload = buildPayload();
+        st0.datesText = f.dates.value;
+        saveState(st0);
 
-        const shiftStop = !!e.shiftKey;
-        const stNow = getState();
+        const enabled = !!st0.syncEnabled;
+        const paused = !!st0.paused;
 
-        // persist current payload + dates before actions
-        setState((s) => {
-          s.payload = buildPayload();
-          s.datesText = f.dates.value;
-          return s;
-        });
-
-        if (shiftStop) {
-          // STOP/RESET
-          setState((s) => {
-            s.sync = s.sync || {};
-            s.sync.stopRequested = true;
-            s.sync.pauseRequested = false;
-            s.sync.mode = "stopped";
-            return s;
-          });
-
-          setStatus("🛑 Stop requested (SHIFT+Click). Runner will stop safely after current step.");
-          syncButtonUiFromState();
-          return;
-        }
-
-        const modeNow = stNow.sync?.mode || "stopped";
-
-        if (modeNow === "stopped") {
+        if (!enabled) {
           // START
-          setState((s) => {
-            s.sync = s.sync || {};
-            s.sync.mode = "running";
-            s.sync.stopRequested = false;
-            s.sync.pauseRequested = false;
-            return s;
-          });
-          syncButtonUiFromState();
+          setSyncState((s) => { s.syncEnabled = true; s.paused = false; return s; });
+          refreshSyncButtonLabel();
 
+          // KeepAlive ON if autoDaily ON (or while running)
+          const payload = getSyncState().payload || getDefaultTexts();
+          if (payload.autoDaily) KeepAlive.start(() => maybeDailyReloadOrRun(setStatus));
+
+          setStatus("▶️ Sync started. Running now…");
           await startRunFromEmployeePage(setStatus, f.dates.value);
           return;
         }
 
-        if (modeNow === "running") {
+        if (!paused) {
           // PAUSE
-          setState((s) => {
-            s.sync = s.sync || {};
-            s.sync.mode = "paused";
-            s.sync.pauseRequested = true;
-            return s;
-          });
-          setStatus("⏸️ Pause requested. Runner will pause after current date is processed.");
-          syncButtonUiFromState();
+          setSyncState((s) => { s.paused = true; return s; });
+          refreshSyncButtonLabel();
+          KeepAlive.stop();
+          setStatus("⏸️ Sync paused. Daily checks will NOT run while paused.");
           return;
         }
 
-        if (modeNow === "paused") {
-          // RESUME
-          const s2 = setState((s) => {
-            s.sync = s.sync || {};
-            s.sync.mode = "running";
-            s.sync.pauseRequested = false;
-            return s;
-          });
+        // RESUME
+        setSyncState((s) => { s.paused = false; return s; });
+        refreshSyncButtonLabel();
 
-          syncButtonUiFromState();
+        const payload = getSyncState().payload || getDefaultTexts();
+        if (payload.autoDaily) KeepAlive.start(() => maybeDailyReloadOrRun(setStatus));
 
-          // If runner tab is gone / not in progress, just start a new run.
-          if (!s2.sync?.inProgress) {
-            setStatus("▶️ Resumed, but no active runner found. Starting a fresh run…");
-            await startRunFromEmployeePage(setStatus, f.dates.value);
-          } else {
-            setStatus("▶️ Resumed. Runner will continue in its tab.");
-          }
-          return;
-        }
+        setStatus("▶️ Sync resumed. Running now…");
+        await startRunFromEmployeePage(setStatus, f.dates.value);
+        return;
+      }
+
+      if (act === "hardStop") {
+        setSyncState((s) => {
+          s.syncEnabled = false;
+          s.paused = false;
+          s.sync = s.sync || {};
+          s.sync.stopRequested = true;
+          s.sync.inProgress = false;
+          return s;
+        });
+        KeepAlive.stop();
+        refreshSyncButtonLabel();
+        setStatus("🛑 Fully stopped. Runner (if any) will stop on next step.");
+        return;
       }
 
       if (act === "fillOnlyHere") {
@@ -940,107 +1071,137 @@ Help Team with Automation;`;
           setStatus("Fill Here only works on /employee/standup-form.");
           return;
         }
-        setState((s) => { s.payload = buildPayload(); return s; });
+        const st = getSyncState();
+        st.payload = buildPayload();
+        saveState(st);
 
-        const st = getState();
         const date = resolveAutoDateFromQuery() || dhakaISODateNow();
-        await fillStandupForm(st.payload, date, setStatus);
+        await fillStandupForm(st.payload, date);
         setStatus(`✅ Filled (test) for ${date}. Not submitted by Fill Here.`);
       }
     });
 
-    // keep button fresh
-    const int = setInterval(() => {
-      if (!document.body.contains(root)) { clearInterval(int); return; }
-      syncButtonUiFromState();
-    }, 800);
+    // keep pill updated when editing dates
+    if (f.dates) {
+      f.dates.addEventListener("input", () => {
+        const prev = getSyncState();
+        prev.datesText = f.dates.value;
+        saveState(prev);
+        setPill(`${parseISOListFromText(f.dates.value).length} missing`);
+      });
+    }
 
-    // storage event (other tab updates)
-    window.addEventListener("storage", (ev) => {
-      if (ev.key === STORE_KEY) syncButtonUiFromState();
-    });
-
-    return { setStatus, setPill, toggleBody };
+    return { setStatus, setPill, toggleBody, refreshSyncButtonLabel };
   }
 
   // -------------------------
-  // Daily scheduler (only when running & not paused)
+  // Daily scheduler + drift-safe reload
   // -------------------------
-  async function setupDailyCheckOnEmployeePage(setStatus) {
-    const st = getState();
+  function maybeDailyReloadOrRun(setStatus) {
+    const path = location.pathname.replace(/\/+$/, "");
+    if (path !== "/employee") return;
+
+    const st = getSyncState();
     const payload = st.payload || getDefaultTexts();
+    if (!st.syncEnabled || st.paused) return;
+    if (!payload.autoDaily) return;
 
-    // Only when user left mode as running
-    if (st.sync?.mode !== "running") {
-      setStatus(
-        `Mode: ${st.sync?.mode || "stopped"}\n` +
-        `Daily checks run only when Mode is RUNNING.\n` +
-        `Next midnight: ${formatDhakaNextMidnight()}`
-      );
-      return;
-    }
-
-    if (!payload.autoDaily) {
-      setStatus(
-        `Mode: RUNNING\nDaily check is OFF (toggle it ON).\nNext midnight: ${formatDhakaNextMidnight()}`
-      );
-      return;
-    }
-
-    // Do once per Dhaka day
+    // If we've crossed into a new Dhaka date and haven't checked yet, do a reload.
     const todayDhaka = dhakaISODateNow();
     const last = st.lastDailyDhaka || null;
-
     if (last !== todayDhaka) {
-      setState((s) => { s.lastDailyDhaka = todayDhaka; return s; });
+      setSyncState((s) => { s.lastDailyDhaka = todayDhaka; return s; });
+      // reload to make sure Pending Tasks is fresh
+      location.reload();
+    }
+  }
 
-      // refresh missing list from DOM
-      const detected = extractMissingStandupDatesFromEmployeePage();
+  function setupMidnightRefresh(setStatus) {
+    const path = location.pathname.replace(/\/+$/, "");
+    if (path !== "/employee") return;
 
-      setStatus(
-        `Daily check (${todayDhaka})\nMissing detected: ${detected.length}\n` +
-        `Auto-run if missing: ${payload.autoRunIfMissing ? "ON" : "OFF"}\n\n` +
-        `Next midnight: ${formatDhakaNextMidnight()}`
-      );
+    const st = getSyncState();
+    const payload = st.payload || getDefaultTexts();
+    if (!st.syncEnabled || st.paused) return;
+    if (!payload.autoDaily) return;
 
-      // If missing and not already in progress -> run
-      if (payload.autoRunIfMissing && detected.length && !st.sync?.inProgress) {
-        // Merge detected with whatever user left in the box
-        const mergedText = uniqSortedISO([
-          ...detected,
-          ...parseISOListFromText(st.datesText || "")
-        ]).join(", ");
+    const ms = msUntilNextDhakaMidnight();
+    setStatus(
+      `Sync running.\nNext midnight refresh: ${formatDhakaNextMidnight()}\nKeepAlive: ${KeepAlive.isRunning() ? "ON" : "OFF"}`
+    );
 
-        await startRunFromEmployeePage(setStatus, mergedText);
-      }
+    // schedule an exact reload (best effort)
+    setTimeout(() => {
+      const st2 = getSyncState();
+      const payload2 = st2.payload || getDefaultTexts();
+      if (!st2.syncEnabled || st2.paused || !payload2.autoDaily) return;
+      if (location.pathname.replace(/\/+$/, "") === "/employee") location.reload();
+    }, ms + 250);
+  }
+
+  async function afterReloadAutoRunIfMissing(setStatus, toggleBodyFn) {
+    const st = getSyncState();
+    const payload = st.payload || getDefaultTexts();
+    if (!st.syncEnabled || st.paused) return;
+    if (!payload.autoDaily) return;
+
+    // once per Dhaka day
+    const todayDhaka = dhakaISODateNow();
+    if (st.lastAutoRunDhaka === todayDhaka) return;
+    setSyncState((s) => { s.lastAutoRunDhaka = todayDhaka; return s; });
+
+    const detected = extractMissingStandupDatesFromEmployeePage();
+    if (!detected.length) {
+      setStatus(`Daily check (${todayDhaka}) → no missing.\nNext: ${formatDhakaNextMidnight()}`);
+      return;
     }
 
-    // If tab stays open, schedule reload at next Dhaka midnight
-    const ms = msUntilNextDhakaMidnight();
-    setTimeout(() => {
-      const p = location.pathname.replace(/\/+$/, "");
-      const cur = getState();
-      if (p === "/employee" && cur.sync?.mode === "running") {
-        location.reload();
-      }
-    }, ms + 400);
+    if (!payload.autoRunIfMissing) {
+      setStatus(`Daily check (${todayDhaka}) → missing ${detected.length}, but auto-run is OFF.`);
+      return;
+    }
+
+    // Auto-run
+    toggleBodyFn?.(true);
+    const mergedText = uniqSortedISO([...detected, ...parseISOListFromText(st.datesText || "")]).join(", ");
+    setStatus(`Daily check (${todayDhaka}) → missing ${detected.length}\nRunning sync now…`);
+    await startRunFromEmployeePage(setStatus, mergedText);
   }
 
   // -------------------------
-  // Main init
+  // SPA route change hook (so widget doesn't "disappear")
   // -------------------------
-  async function init() {
+  function hookHistory(onChange) {
+    const fire = () => { try { onChange(); } catch {} };
+    const wrap = (fn) => function(...args) { const r = fn.apply(this, args); setTimeout(fire, 0); return r; };
+    history.pushState = wrap(history.pushState);
+    history.replaceState = wrap(history.replaceState);
+    window.addEventListener("popstate", fire, true);
+  }
+
+  // -------------------------
+  // Init
+  // -------------------------
+  async function initForCurrentPath() {
     await ensureBody();
+
     const path = location.pathname.replace(/\/+$/, "");
 
     if (path === "/employee") {
       const { setStatus, toggleBody } = createWidget("employee");
 
-      // If running, auto-open widget (so you can see status)
-      const st = getState();
-      if (st.sync?.mode === "running" || st.sync?.mode === "paused") toggleBody(true);
+      // if syncEnabled & not paused & autoDaily -> keepalive ON
+      const st = getSyncState();
+      const payload = st.payload || getDefaultTexts();
+      if (st.syncEnabled && !st.paused && payload.autoDaily) {
+        // KeepAlive tick also handles drift-safe "new day" detection
+        KeepAlive.start(() => maybeDailyReloadOrRun(setStatus));
+      } else {
+        KeepAlive.stop();
+      }
 
-      await setupDailyCheckOnEmployeePage(setStatus);
+      setupMidnightRefresh(setStatus);
+      await afterReloadAutoRunIfMissing(setStatus, toggleBody);
       return;
     }
 
@@ -1050,17 +1211,21 @@ Help Team with Automation;`;
         await runStepOnStandupForm(setStatus);
       } catch (err) {
         setStatus(`❌ Runner error:\n${String(err?.message || err)}`);
-        setState((s) => {
+        setSyncState((s) => {
           s.sync = s.sync || {};
           s.sync.inProgress = false;
-          s.sync.stopRequested = true;
-          s.sync.mode = "stopped";
+          s.sync.lastRunSummary = { error: String(err?.message || err), at: Date.now() };
           return s;
         });
       }
       return;
     }
+
+    // outside intended pages: do nothing
   }
 
-  init();
+  hookHistory(initForCurrentPath);
+
+  // run once
+  initForCurrentPath();
 })();
