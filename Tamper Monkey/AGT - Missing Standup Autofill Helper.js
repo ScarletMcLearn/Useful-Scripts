@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AGT - Standup Missing Sync (Auto-fill + Auto-submit + KeepAlive + Daily BD Midnight)
+// @name         AGT - Standup Missing Sync (Auto-fill + Auto-submit + KeepAlive + Interval Scheduler)
 // @namespace    https://allgentech.io/
-// @version      2.1.0
-// @description  /employee: detects missing daily standup dates, Start/Pause toggle. When running: processes ALL (fills+submits) except excluded. Optional auto-daily at 12:00 AM Bangladesh time with refresh + keep-alive (audio + worker + beacon + scroll nudge + wake lock).
+// @version      2.3.1
+// @description  /employee: detects missing daily standup dates, Start/Pause toggle. When running: processes ALL (fills+submits) except excluded. Optional auto-check every N minutes + keep-alive (audio + worker + beacon + scroll nudge + wake lock).
 // @match        https://allgentech.io/employee
 // @match        https://allgentech.io/employee/
 // @match        https://allgentech.io/employee/standup-form*
@@ -13,12 +13,53 @@
 (() => {
   "use strict";
 
-  const STORE_KEY = "agt_standup_sync_v2_1";
-  const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000; // UTC+6 (Bangladesh)
+  // ============================================================
+  // ✅ USER CONFIG (ALL DEFAULTS LIVE HERE)
+  // ============================================================
 
-  // -------------------------
-  // Keep Alive config (similar to your GitHub script)
-  // -------------------------
+  // Storage / timezone
+  const STORE_KEY = "agt_standup_sync_v2_3"; // keep same so your saved defaults persist
+  const DHAKA_OFFSET_MS = 6 * 60 * 60 * 1000; // UTC+6 (fallback if Intl TZ isn't available)
+
+  // Scheduler interval
+  const SYNC_CHECK_EVERY_MINUTES = 1; // 1, 5, 10, 15, 30...
+  const SYNC_CHECK_INTERVAL_MS = Math.max(60_000, SYNC_CHECK_EVERY_MINUTES * 60_000); // min 1 minute
+
+  // Widget UI defaults
+  const WIDGET_RIGHT_PX = 14;
+  const WIDGET_BOTTOM_PX = 14;
+  const WIDGET_WIDTH_PX = 480;
+  const WIDGET_MAX_HEIGHT_VH = 78;
+
+  // Form defaults (what gets filled)
+  const DEFAULT_COMMON_WORK =
+`Internal and External Meetings;
+Meetings with Internal Members (Management + QA);
+Resolving queries of Team Members and helping out where necessary;
+Create setup functions, utility functions and automated test cases;
+Refactor code;
+Review Manual Test Cases;
+Help Team with Automation;`;
+
+  const DEFAULT_YESTERDAY_TEXT = DEFAULT_COMMON_WORK;
+  const DEFAULT_ACHIEVEMENTS_TEXT = "N/A";
+  const DEFAULT_TODAY_TEXT = DEFAULT_COMMON_WORK;
+  const DEFAULT_TOMORROW_TEXT = DEFAULT_COMMON_WORK;
+
+  const DEFAULT_ASSIGNED_COUNT = 10;
+  const DEFAULT_TESTED_COUNT = 10;
+  const DEFAULT_BUGS_COUNT = 0;
+
+  const DEFAULT_BLOCKERS = "No";      // "No" => selects No. Anything else => Yes
+  const DEFAULT_WORK_STATUS = "Good"; // Good | Moderate | Bad
+  const DEFAULT_EXCLUDE_DATES = "";   // leave empty unless you want defaults
+
+  // Default toggles
+  const DEFAULT_AUTO_SUBMIT = true;       // fills AND submits
+  const DEFAULT_AUTO_DAILY = true;        // periodic check
+  const DEFAULT_AUTO_RUN_IF_MISSING = true;
+
+  // Keep Alive config defaults
   const KA_CFG = {
     USE_AUDIO: true,
     USE_WORKER_TICK: true,
@@ -33,6 +74,13 @@
     LOG_DEBUG: false,
   };
 
+  // Optional internal timeouts (safe to leave)
+  const WAIT_BODY_MAX_TRIES = 200;
+  const WAIT_BODY_SLEEP_MS = 25;
+
+  // ============================================================
+  // Logging
+  // ============================================================
   const LOG = {
     d: (...a) => KA_CFG.LOG_DEBUG && console.log("[agt-standup]", ...a),
     i: (...a) => console.log("[agt-standup]", ...a),
@@ -48,9 +96,9 @@
   const $all = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
   async function ensureBody() {
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < WAIT_BODY_MAX_TRIES; i++) {
       if (document.body) return;
-      await sleep(25);
+      await sleep(WAIT_BODY_SLEEP_MS);
     }
   }
 
@@ -89,6 +137,23 @@
 
   function pad2(n) { return String(n).padStart(2, "0"); }
 
+  function formatDhakaDateTime(msEpoch) {
+    try {
+      return new Date(msEpoch).toLocaleString("en-GB", {
+        timeZone: "Asia/Dhaka",
+        hour12: false,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+    } catch {
+      return new Date(msEpoch).toISOString();
+    }
+  }
+
   // -------------------------
   // Dhaka time helpers
   // -------------------------
@@ -107,21 +172,6 @@
   function dhakaISODateNow() {
     const p = getDhakaPartsNow();
     return `${p.y}-${pad2(p.m)}-${pad2(p.d)}`;
-  }
-
-  function msUntilNextDhakaMidnight() {
-    const p = getDhakaPartsNow();
-    const targetUtcMs = Date.UTC(p.y, p.m - 1, p.d + 1, 0, 0, 0) - DHAKA_OFFSET_MS;
-    return Math.max(0, targetUtcMs - Date.now());
-  }
-
-  function formatDhakaNextMidnight() {
-    const p = getDhakaPartsNow();
-    const tmp = new Date(Date.UTC(p.y, p.m - 1, p.d + 1, 0, 0, 0));
-    const y = tmp.getUTCFullYear();
-    const m = tmp.getUTCMonth() + 1;
-    const d = tmp.getUTCDate();
-    return `${y}-${pad2(m)}-${pad2(d)} 00:00 (BD)`;
   }
 
   // -------------------------
@@ -197,18 +247,15 @@
       .filter(Boolean);
 
     for (const part of parts) {
-      // direct ISO
       const directIso = normalizeISOLoose(part) || normalizeISODate(part);
       if (directIso) { set.add(directIso); continue; }
 
-      // ISO embedded in junk
       const embedded = part.match(/(\d{4}-\d{1,2}-\d{1,2})/);
       if (embedded) {
         const iso = normalizeISOLoose(embedded[1]) || normalizeISODate(embedded[1]);
         if (iso) { set.add(iso); continue; }
       }
 
-      // dd-mm-yy / mm-dd-yy / dd-mm-yyyy / mm-dd-yyyy
       const m = part.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{2}|\d{4})$/);
       if (!m) continue;
 
@@ -230,67 +277,94 @@
   }
 
   // -------------------------
-  // Defaults payload
+  // Defaults payload (now uses top variables)
   // -------------------------
   function getDefaultTexts() {
-    const common =
-`Internal and External Meetings;
-Meetings with Internal Members (Management + QA);
-Resolving queries of Team Members and helping out where necessary;
-Create setup functions, utility functions and automated test cases;
-Refactor code;
-Review Manual Test Cases;
-Help Team with Automation;`;
-
     return {
-      yesterday: common,
-      achievements: "N/A",
-      today: common,
-      tomorrow: common,
-      assigned: 10,
-      tested: 10,
-      bugs: 0,
-      blockers: "No",
-      workStatus: "Good",
-      excludeDates: "",
+      yesterday: DEFAULT_YESTERDAY_TEXT,
+      achievements: DEFAULT_ACHIEVEMENTS_TEXT,
+      today: DEFAULT_TODAY_TEXT,
+      tomorrow: DEFAULT_TOMORROW_TEXT,
 
-      autoSubmit: true,        // you asked for submit in sync mode
-      autoDaily: true,         // you asked for daily midnight checks
-      autoRunIfMissing: true,  // when daily check finds missing → run
+      assigned: DEFAULT_ASSIGNED_COUNT,
+      tested: DEFAULT_TESTED_COUNT,
+      bugs: DEFAULT_BUGS_COUNT,
+
+      blockers: DEFAULT_BLOCKERS,
+      workStatus: DEFAULT_WORK_STATUS,
+      excludeDates: DEFAULT_EXCLUDE_DATES,
+
+      autoSubmit: DEFAULT_AUTO_SUBMIT,
+      autoDaily: DEFAULT_AUTO_DAILY,
+      autoRunIfMissing: DEFAULT_AUTO_RUN_IF_MISSING,
     };
   }
 
   // -------------------------
-  // Extract missing dates from /employee Pending Tasks DOM
+  // ✅ Robust Missing Dates Extractor (works with async cards)
   // -------------------------
   function extractMissingStandupDatesFromEmployeePage() {
-    const lis = $all("li");
+    const TARGET_RE = /Missing\s+Daily\s+Standup/i;
+    const CUE_RE = /daily standup for|has not submitted/i;
+
     const isoDates = [];
 
-    for (const li of lis) {
-      const txt = (li.textContent || "").replace(/\s+/g, " ").trim();
-      if (!txt) continue;
-      if (!/Missing Daily Standup/i.test(txt)) continue;
+    const addIso = (raw) => {
+      const iso = normalizeISOLoose(raw) || normalizeISODate(raw);
+      if (iso) isoDates.push(iso);
+    };
 
-      const mIso = txt.match(/\b(\d{4}-\d{2}-\d{2})\b/);
-      if (mIso) {
-        const iso = normalizeISODate(mIso[1]);
-        if (iso) isoDates.push(iso);
-        continue;
-      }
+    const addNumericDate = (a, b, y) => {
+      const A = Number(a), B = Number(b), Y = Number(y);
+      if (!Number.isFinite(A) || !Number.isFinite(B) || !Number.isFinite(Y)) return;
 
-      const mMdy = txt.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
-      if (mMdy) {
-        const iso = mdyToISO(mMdy[1], mMdy[2], mMdy[3]);
-        if (iso) isoDates.push(iso);
-      }
+      let iso = null;
+      if (A > 12 && B <= 12) iso = dmyToISO(A, B, Y);          // DD/MM/YYYY
+      else if (B > 12 && A <= 12) iso = mdyToISO(A, B, Y);     // MM/DD/YYYY
+      else iso = mdyToISO(A, B, Y) || dmyToISO(A, B, Y);
+
+      if (iso) isoDates.push(iso);
+    };
+
+    const text = (document.body?.innerText || "").replace(/\r/g, "");
+    if (!text.trim()) return [];
+
+    const lines = text
+      .split(/\n+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!TARGET_RE.test(line) && !CUE_RE.test(line)) continue;
+
+      const chunk = [
+        lines[i - 2], lines[i - 1], lines[i],
+        lines[i + 1], lines[i + 2], lines[i + 3],
+      ].filter(Boolean).join(" ");
+
+      for (const m of chunk.matchAll(/\b(\d{4}-\d{1,2}-\d{1,2})\b/g)) addIso(m[1]);
+      for (const m of chunk.matchAll(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g)) addNumericDate(m[1], m[2], m[3]);
+      for (const m of chunk.matchAll(/\b(\d{1,2})-(\d{1,2})-(\d{4})\b/g)) addNumericDate(m[1], m[2], m[3]);
     }
 
     return uniqSortedISO(isoDates);
   }
 
+  async function waitForMissingDates(maxWaitMs = 8000) {
+    const t0 = Date.now();
+    let last = [];
+    while (Date.now() - t0 < maxWaitMs) {
+      const now = extractMissingStandupDatesFromEmployeePage();
+      if (now.length && JSON.stringify(now) === JSON.stringify(last)) return now;
+      last = now;
+      await sleep(400);
+    }
+    return extractMissingStandupDatesFromEmployeePage();
+  }
+
   // -------------------------
-  // Keep Alive (audio + worker + beacon + scroll + wake lock + drift checks)
+  // Keep Alive
   // -------------------------
   const KeepAlive = (() => {
     let worker = null;
@@ -336,7 +410,6 @@ Help Team with Automation;`;
           await audioTag.play();
           LOG.d("keepalive audio (tag) started");
         } catch {
-          // Most browsers require a user gesture; we'll just fail silently.
           LOG.d("keepalive audio blocked (no user gesture?)");
         }
       }
@@ -423,7 +496,6 @@ Help Team with Automation;`;
       if (running) return;
       running = true;
 
-      // Best effort: audio + wake lock work best after user click
       startAudio();
       if (!document.hidden) acquireWakeLock();
 
@@ -482,15 +554,17 @@ Help Team with Automation;`;
 
     const dateInput = await waitFor(() =>
       form.querySelector('input[placeholder="YYYY-MM-DD"]') ||
-      form.querySelector('input.input.input-bordered[type="text"]'),
+      form.querySelector('input.input.input-bordered[type="text"]') ||
+      form.querySelector('input[type="text"][name*="date" i]') ||
+      form.querySelector('input[type="text"][id*="date" i]'),
       15000
     );
     if (!dateInput) throw new Error("Could not find the Date input.");
     setNativeValue(dateInput, dateToUse);
 
-    const yTa = form.querySelector('textarea[placeholder="What did you do yesterday?"]');
-    const tTa = form.querySelector('textarea[placeholder="What will you do today?"]');
-    const tmTa = form.querySelector('textarea[placeholder="What will you do tomorrow?"]');
+    const yTa = form.querySelector('textarea[placeholder="What did you do yesterday?"]') || form.querySelector('textarea[name*="yesterday" i]');
+    const tTa = form.querySelector('textarea[placeholder="What will you do today?"]') || form.querySelector('textarea[name*="today" i]');
+    const tmTa = form.querySelector('textarea[placeholder="What will you do tomorrow?"]') || form.querySelector('textarea[name*="tomorrow" i]');
 
     if (yTa) setNativeValue(yTa, buildYesterdayWithAchievements(payload.yesterday, payload.achievements));
     if (tTa) setNativeValue(tTa, payload.today || "");
@@ -500,9 +574,9 @@ Help Team with Automation;`;
     const tested = form.querySelector('input[placeholder="Number of story tickets tested"]');
     const bugs = form.querySelector('input[placeholder="Number of bug tickets created"]');
 
-    if (assigned) setNativeValue(assigned, String(payload.assigned ?? 10));
-    if (tested) setNativeValue(tested, String(payload.tested ?? 10));
-    if (bugs) setNativeValue(bugs, String(payload.bugs ?? 0));
+    if (assigned) setNativeValue(assigned, String(payload.assigned ?? DEFAULT_ASSIGNED_COUNT));
+    if (tested) setNativeValue(tested, String(payload.tested ?? DEFAULT_TESTED_COUNT));
+    if (bugs) setNativeValue(bugs, String(payload.bugs ?? DEFAULT_BUGS_COUNT));
 
     const blockersSelect = $all("select", form).find((s) => {
       const opts = $all("option", s).map((o) => (o.value || o.textContent || "").trim());
@@ -513,24 +587,34 @@ Help Team with Automation;`;
       setNativeValue(blockersSelect, b === "no" ? "No" : "Yes");
     }
 
-    const wsWanted = String(payload.workStatus || "Good").trim();
-    const radioInputs = $all('input[type="radio"][name="Work Status"]', form);
+    // Work status: try radio first, else fallback to select
+    const wsWanted = String(payload.workStatus || DEFAULT_WORK_STATUS).trim();
+    const radioInputs = $all('input[type="radio"]', form);
     const targetRadio = radioInputs.find((r) => String(r.value || "").trim() === wsWanted);
     if (targetRadio) {
       const label = targetRadio.closest("label");
       (label || targetRadio).click();
       await sleep(80);
+    } else {
+      const wsSelect = $all("select", form).find((s) => {
+        const opts = $all("option", s).map((o) => (o.value || o.textContent || "").trim());
+        return opts.includes("Good") && opts.includes("Moderate") && opts.includes("Bad");
+      });
+      if (wsSelect) setNativeValue(wsSelect, wsWanted);
     }
 
     return { form };
   }
 
   async function submitStandupForm(form) {
-    const submitBtn = form.querySelector('button[type="submit"]');
+    const submitBtn =
+      form.querySelector('button[type="submit"]') ||
+      $all("button", form).find((b) => /submit/i.test(b.textContent || "")) ||
+      $all("button", form).find((b) => /submit/i.test(b.getAttribute("aria-label") || ""));
+
     if (!submitBtn) throw new Error("Could not find Submit button.");
     submitBtn.click();
 
-    // Best-effort: wait for navigation or button disable/state change
     await waitFor(() => {
       const btn = form.querySelector('button[type="submit"]');
       if (!btn) return true;
@@ -608,7 +692,6 @@ Help Team with Automation;`;
     const first = queue[0];
     const url = `https://allgentech.io/employee/standup-form?autoFillDate=${encodeURIComponent(first)}&runId=${encodeURIComponent(runId)}&auto=1`;
 
-    // Try new tab (preferred). If blocked, run in same tab.
     const w = window.open(url, "_blank");
     if (!w) {
       setStatus("Popup blocked. Running in THIS tab instead...");
@@ -631,8 +714,7 @@ Help Team with Automation;`;
     const dateToUse = resolveAutoDateFromQuery();
     if (!isAuto || !runId || !dateToUse) return;
 
-    // KeepAlive in runner tab too (best-effort)
-    KeepAlive.start(() => { /* just keeping alive */ });
+    KeepAlive.start(() => { /* keep alive only */ });
 
     const st = getSyncState();
     const payload = st.payload || getDefaultTexts();
@@ -643,7 +725,6 @@ Help Team with Automation;`;
       return;
     }
 
-    // Stop request?
     if (sync.stopRequested) {
       setStatus("🛑 Stop requested. Ending run and returning to /employee.");
       setSyncState((s) => {
@@ -656,7 +737,6 @@ Help Team with Automation;`;
       return;
     }
 
-    // Respect exclusions (in case changed mid-run)
     const excludeSet = parseExcludeDatesToSet(payload.excludeDates);
     if (excludeSet.has(dateToUse)) {
       setStatus(`⏭️ Skipped excluded date: ${dateToUse}`);
@@ -672,7 +752,6 @@ Help Team with Automation;`;
       }
     }
 
-    // Advance
     const next = setSyncState((s) => {
       if (!s.sync || s.sync.runId !== runId) return s;
       s.sync.index = (s.sync.index || 0) + 1;
@@ -707,19 +786,27 @@ Help Team with Automation;`;
   }
 
   // -------------------------
-  // Widget
+  // Widget (SPA-safe + auto-rescan on async render)
   // -------------------------
-  function createWidget(mode) {
-    if (document.getElementById("agt-standup-sync-widget")) return;
+  let WIDGET = null;
+  let __mo = null;
+  let __autoScanTimer = null;
+  let __lastAutoScanAt = 0;
+
+  function createOrUpdateWidget(mode) {
+    if (WIDGET && WIDGET.root?.isConnected) {
+      WIDGET.configure(mode);
+      return WIDGET.api;
+    }
 
     const root = document.createElement("div");
     root.id = "agt-standup-sync-widget";
     root.style.cssText = `
       position: fixed;
-      right: 14px;
-      bottom: 14px;
+      right: ${WIDGET_RIGHT_PX}px;
+      bottom: ${WIDGET_BOTTOM_PX}px;
       z-index: 999999;
-      width: 480px;
+      width: ${WIDGET_WIDTH_PX}px;
       font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
       color: #111827;
     `;
@@ -734,7 +821,7 @@ Help Team with Automation;`;
           <button data-act="toggle" title="Expand" style="border:none;background:transparent;cursor:pointer;font-size:14px;line-height:1;padding:4px 8px;border-radius:8px;">+</button>
         </div>
 
-        <div data-body style="padding:10px 12px;display:none;max-height:78vh;overflow:auto;">
+        <div data-body style="padding:10px 12px;display:none;max-height:${WIDGET_MAX_HEIGHT_VH}vh;overflow:auto;">
           <div data-employee-only style="display:none;">
             <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
               <button data-act="scan" style="padding:8px 10px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:#ffffff;cursor:pointer;font-weight:800;font-size:13px;">Scan</button>
@@ -752,12 +839,12 @@ Help Team with Automation;`;
 
             <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:8px;">
               <input data-field="autoDaily" type="checkbox">
-              Auto daily check @ 12:00 AM Bangladesh time (best-effort; requires browser open)
+              Auto check every ${SYNC_CHECK_EVERY_MINUTES} minutes
             </label>
 
             <label style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:10px;">
               <input data-field="autoRunIfMissing" type="checkbox">
-              If auto-daily finds missing → automatically run sync
+              If auto-check finds missing → automatically run sync
             </label>
 
             <label style="display:flex;flex-direction:column;gap:6px;font-size:12px;margin-bottom:10px;">
@@ -869,12 +956,15 @@ Help Team with Automation;`;
         achievements: String(f.achievements.value || ""),
         today: String(f.today.value || ""),
         tomorrow: String(f.tomorrow.value || ""),
+
         assigned: Number(f.assigned.value || 0),
         tested: Number(f.tested.value || 0),
         bugs: Number(f.bugs.value || 0),
+
         blockers: String(f.blockers.value || ""),
-        workStatus: String(f.workStatus.value || "Good"),
+        workStatus: String(f.workStatus.value || DEFAULT_WORK_STATUS),
         excludeDates: String(f.excludeDates.value || ""),
+
         autoSubmit: !!f.autoSubmit.checked,
         autoDaily: !!f.autoDaily.checked,
         autoRunIfMissing: !!f.autoRunIfMissing.checked,
@@ -921,10 +1011,6 @@ Help Team with Automation;`;
       toggleBody(null);
     });
 
-    // init
-    const st = getSyncState();
-    applyPayload(st.payload);
-
     function refreshSyncButtonLabel() {
       const s = getSyncState();
       const enabled = !!s.syncEnabled;
@@ -943,32 +1029,16 @@ Help Team with Automation;`;
       }
     }
 
-    // Employee-only mode init
-    if (mode === "employee") {
-      employeeOnly.style.display = "block";
-      const detected = extractMissingStandupDatesFromEmployeePage();
-      const existingDates = parseISOListFromText(st.datesText || "");
-      const merged = uniqSortedISO([...detected, ...existingDates]);
-      f.dates.value = merged.join(", ");
-      setPill(`${merged.length} missing`);
-      refreshSyncButtonLabel();
+    const st = getSyncState();
+    applyPayload(st.payload);
 
-      setStatus(
-        `Detected missing: ${detected.length}\n` +
-        `Manual list: ${existingDates.length}\n` +
-        `Total list: ${merged.length}\n` +
-        `Next midnight check: ${formatDhakaNextMidnight()}\n` +
-        `KeepAlive: ${KeepAlive.isRunning() ? "ON" : "OFF"}`
-      );
+    const autosaveFields = [
+      "yesterday","achievements","today","tomorrow",
+      "assigned","tested","bugs",
+      "blockers","workStatus","excludeDates",
+      "autoSubmit","autoDaily","autoRunIfMissing"
+    ];
 
-      setSyncState((s) => { s.datesText = f.dates.value; return s; });
-    } else {
-      setPill(mode === "standup-form" ? "runner" : "standup");
-      setStatus("Standup form page. Runner will handle auto steps when opened with ?auto=1. Fill Here is test-only.");
-    }
-
-    // autosave
-    const autosaveFields = ["yesterday","achievements","today","tomorrow","assigned","tested","bugs","blockers","workStatus","excludeDates","autoSubmit","autoDaily","autoRunIfMissing"];
     for (const k of autosaveFields) {
       const el = f[k];
       const evt = el.type === "checkbox" ? "change" : "input";
@@ -980,7 +1050,6 @@ Help Team with Automation;`;
       });
     }
 
-    // actions
     root.addEventListener("click", async (e) => {
       const btn = e.target.closest("button");
       if (!btn) return;
@@ -996,18 +1065,24 @@ Help Team with Automation;`;
       }
 
       if (act === "scan") {
-        const detected = extractMissingStandupDatesFromEmployeePage();
+        const detected = await waitForMissingDates(6000);
         const manual = parseISOListFromText(f.dates.value);
         const merged = uniqSortedISO([...detected, ...manual]);
         f.dates.value = merged.join(", ");
         setPill(`${merged.length} missing`);
         setSyncState((s) => { s.datesText = f.dates.value; return s; });
-        setStatus(`✅ Scan complete\nDetected: ${detected.length}\nTotal list: ${merged.length}\nNext midnight: ${formatDhakaNextMidnight()}`);
+
+        const s2 = getSyncState();
+        const nextAt = s2.nextCheckAt || 0;
+        setStatus(
+          `✅ Scan complete\nDetected: ${detected.length}\nTotal list: ${merged.length}\n` +
+          `Auto-check interval: ${SYNC_CHECK_EVERY_MINUTES} min\n` +
+          `Next scheduled check: ${nextAt ? formatDhakaDateTime(nextAt) + " (BD)" : "Not scheduled yet"}`
+        );
         return;
       }
 
       if (act === "syncToggle") {
-        // user gesture: best time to start audio + wake lock
         const st0 = getSyncState();
         st0.payload = buildPayload();
         st0.datesText = f.dates.value;
@@ -1017,13 +1092,16 @@ Help Team with Automation;`;
         const paused = !!st0.paused;
 
         if (!enabled) {
-          // START
-          setSyncState((s) => { s.syncEnabled = true; s.paused = false; return s; });
+          setSyncState((s) => {
+            s.syncEnabled = true;
+            s.paused = false;
+            s.nextCheckAt = Date.now() + SYNC_CHECK_INTERVAL_MS;
+            return s;
+          });
           refreshSyncButtonLabel();
 
-          // KeepAlive ON if autoDaily ON (or while running)
           const payload = getSyncState().payload || getDefaultTexts();
-          if (payload.autoDaily) KeepAlive.start(() => maybeDailyReloadOrRun(setStatus));
+          if (payload.autoDaily) KeepAlive.start(() => maybeIntervalReloadOrRun(setStatus));
 
           setStatus("▶️ Sync started. Running now…");
           await startRunFromEmployeePage(setStatus, f.dates.value);
@@ -1031,20 +1109,23 @@ Help Team with Automation;`;
         }
 
         if (!paused) {
-          // PAUSE
           setSyncState((s) => { s.paused = true; return s; });
           refreshSyncButtonLabel();
           KeepAlive.stop();
-          setStatus("⏸️ Sync paused. Daily checks will NOT run while paused.");
+          setStatus("⏸️ Sync paused. Auto-checks will NOT run while paused.");
           return;
         }
 
-        // RESUME
-        setSyncState((s) => { s.paused = false; return s; });
+        setSyncState((s) => {
+          s.paused = false;
+          const now = Date.now();
+          if (!s.nextCheckAt || s.nextCheckAt <= now) s.nextCheckAt = now + SYNC_CHECK_INTERVAL_MS;
+          return s;
+        });
         refreshSyncButtonLabel();
 
         const payload = getSyncState().payload || getDefaultTexts();
-        if (payload.autoDaily) KeepAlive.start(() => maybeDailyReloadOrRun(setStatus));
+        if (payload.autoDaily) KeepAlive.start(() => maybeIntervalReloadOrRun(setStatus));
 
         setStatus("▶️ Sync resumed. Running now…");
         await startRunFromEmployeePage(setStatus, f.dates.value);
@@ -1055,6 +1136,9 @@ Help Team with Automation;`;
         setSyncState((s) => {
           s.syncEnabled = false;
           s.paused = false;
+          s.nextCheckAt = 0;
+          s.lastSchedulerReloadAt = 0;
+          s.lastSchedulerAutoRunAt = 0;
           s.sync = s.sync || {};
           s.sync.stopRequested = true;
           s.sync.inProgress = false;
@@ -1071,17 +1155,16 @@ Help Team with Automation;`;
           setStatus("Fill Here only works on /employee/standup-form.");
           return;
         }
-        const st = getSyncState();
-        st.payload = buildPayload();
-        saveState(st);
+        const stx = getSyncState();
+        stx.payload = buildPayload();
+        saveState(stx);
 
         const date = resolveAutoDateFromQuery() || dhakaISODateNow();
-        await fillStandupForm(st.payload, date);
+        await fillStandupForm(stx.payload, date);
         setStatus(`✅ Filled (test) for ${date}. Not submitted by Fill Here.`);
       }
     });
 
-    // keep pill updated when editing dates
     if (f.dates) {
       f.dates.addEventListener("input", () => {
         const prev = getSyncState();
@@ -1091,13 +1174,70 @@ Help Team with Automation;`;
       });
     }
 
-    return { setStatus, setPill, toggleBody, refreshSyncButtonLabel };
+    function configure(mode) {
+      const st2 = getSyncState();
+      applyPayload(st2.payload);
+
+      if (mode === "employee") {
+        employeeOnly.style.display = "block";
+        refreshSyncButtonLabel();
+
+        // initial scan (async cards)
+        setTimeout(() => { try { root.querySelector('button[data-act="scan"]')?.click(); } catch {} }, 1200);
+        setTimeout(() => { try { root.querySelector('button[data-act="scan"]')?.click(); } catch {} }, 3200);
+
+        // MutationObserver auto-rescan (async card rendering)
+        const scanBtn = root.querySelector('button[data-act="scan"]');
+        const scheduleAutoScan = () => {
+          const now = Date.now();
+          if (now - __lastAutoScanAt < 1500) return; // throttle
+          __lastAutoScanAt = now;
+          clearTimeout(__autoScanTimer);
+          __autoScanTimer = setTimeout(() => { try { scanBtn?.click(); } catch {} }, 900);
+        };
+
+        if (!__mo) {
+          try {
+            __mo = new MutationObserver(scheduleAutoScan);
+            __mo.observe(document.body, { childList: true, subtree: true, characterData: true });
+          } catch {}
+        }
+
+        const detected = extractMissingStandupDatesFromEmployeePage();
+        const existingDates = parseISOListFromText(st2.datesText || "");
+        const merged = uniqSortedISO([...detected, ...existingDates]);
+        f.dates.value = merged.join(", ");
+        setPill(`${merged.length} missing`);
+
+        const nextAt = st2.nextCheckAt || 0;
+        setStatus(
+          `Detected missing: ${detected.length}\n` +
+          `Manual list: ${existingDates.length}\n` +
+          `Total list: ${merged.length}\n` +
+          `Auto-check interval: ${SYNC_CHECK_EVERY_MINUTES} min\n` +
+          `Next scheduled check: ${nextAt ? formatDhakaDateTime(nextAt) + " (BD)" : "Not scheduled yet"}\n` +
+          `KeepAlive: ${KeepAlive.isRunning() ? "ON" : "OFF"}`
+        );
+
+        setSyncState((s) => { s.datesText = f.dates.value; return s; });
+      } else {
+        employeeOnly.style.display = "none";
+        setPill(mode === "standup-form" ? "runner" : "standup");
+        setStatus("Standup form page. Runner will handle auto steps when opened with ?auto=1. Fill Here is test-only.");
+      }
+    }
+
+    const api = { setStatus, setPill, toggleBody, refreshSyncButtonLabel };
+    WIDGET = { root, api, configure };
+
+    configure(mode);
+    return api;
   }
 
   // -------------------------
-  // Daily scheduler + drift-safe reload
+  // Interval Scheduler
   // -------------------------
-  function maybeDailyReloadOrRun(setStatus) {
+  function maybeIntervalReloadOrRun(setStatus) {
     const path = location.pathname.replace(/\/+$/, "");
     if (path !== "/employee") return;
 
@@ -1106,37 +1246,35 @@ Help Team with Automation;`;
     if (!st.syncEnabled || st.paused) return;
     if (!payload.autoDaily) return;
 
-    // If we've crossed into a new Dhaka date and haven't checked yet, do a reload.
-    const todayDhaka = dhakaISODateNow();
-    const last = st.lastDailyDhaka || null;
-    if (last !== todayDhaka) {
-      setSyncState((s) => { s.lastDailyDhaka = todayDhaka; return s; });
-      // reload to make sure Pending Tasks is fresh
+    if (st.sync && st.sync.inProgress) return;
+
+    const now = Date.now();
+
+    if (!st.nextCheckAt) {
+      setSyncState((s) => { s.nextCheckAt = now + SYNC_CHECK_INTERVAL_MS; return s; });
+      return;
+    }
+
+    if (st.lastSchedulerReloadAt && (now - st.lastSchedulerReloadAt) < 30_000) return;
+
+    if (now >= st.nextCheckAt) {
+      const nextAt = now + SYNC_CHECK_INTERVAL_MS;
+
+      setSyncState((s) => {
+        s.lastSchedulerReloadAt = now;
+        s.nextCheckAt = nextAt;
+        return s;
+      });
+
+      setStatus?.(
+        `⏱️ Auto-check triggered.\n` +
+        `Interval: ${SYNC_CHECK_EVERY_MINUTES} min\n` +
+        `Reloading to refresh Pending Tasks…\n` +
+        `Next scheduled check: ${formatDhakaDateTime(nextAt)} (BD)`
+      );
+
       location.reload();
     }
-  }
-
-  function setupMidnightRefresh(setStatus) {
-    const path = location.pathname.replace(/\/+$/, "");
-    if (path !== "/employee") return;
-
-    const st = getSyncState();
-    const payload = st.payload || getDefaultTexts();
-    if (!st.syncEnabled || st.paused) return;
-    if (!payload.autoDaily) return;
-
-    const ms = msUntilNextDhakaMidnight();
-    setStatus(
-      `Sync running.\nNext midnight refresh: ${formatDhakaNextMidnight()}\nKeepAlive: ${KeepAlive.isRunning() ? "ON" : "OFF"}`
-    );
-
-    // schedule an exact reload (best effort)
-    setTimeout(() => {
-      const st2 = getSyncState();
-      const payload2 = st2.payload || getDefaultTexts();
-      if (!st2.syncEnabled || st2.paused || !payload2.autoDaily) return;
-      if (location.pathname.replace(/\/+$/, "") === "/employee") location.reload();
-    }, ms + 250);
   }
 
   async function afterReloadAutoRunIfMissing(setStatus, toggleBodyFn) {
@@ -1145,34 +1283,62 @@ Help Team with Automation;`;
     if (!st.syncEnabled || st.paused) return;
     if (!payload.autoDaily) return;
 
-    // once per Dhaka day
-    const todayDhaka = dhakaISODateNow();
-    if (st.lastAutoRunDhaka === todayDhaka) return;
-    setSyncState((s) => { s.lastAutoRunDhaka = todayDhaka; return s; });
+    const now = Date.now();
+    const marker = st.lastSchedulerReloadAt || 0;
+    if (!marker || (now - marker) > 2 * 60_000) return;
 
-    const detected = extractMissingStandupDatesFromEmployeePage();
+    if (st.lastSchedulerAutoRunAt === marker) return;
+    setSyncState((s) => { s.lastSchedulerAutoRunAt = marker; return s; });
+
+    const detected = await waitForMissingDates(9000);
+
     if (!detected.length) {
-      setStatus(`Daily check (${todayDhaka}) → no missing.\nNext: ${formatDhakaNextMidnight()}`);
+      const s2 = getSyncState();
+      const nextAt = s2.nextCheckAt || 0;
+      setStatus(
+        `Auto-check → no missing.\n` +
+        `Checked at: ${formatDhakaDateTime(now)} (BD)\n` +
+        `Next scheduled check: ${nextAt ? formatDhakaDateTime(nextAt) + " (BD)" : "Not scheduled"}`
+      );
       return;
     }
 
     if (!payload.autoRunIfMissing) {
-      setStatus(`Daily check (${todayDhaka}) → missing ${detected.length}, but auto-run is OFF.`);
+      setStatus(`Auto-check → missing ${detected.length}, but auto-run is OFF.`);
       return;
     }
 
-    // Auto-run
     toggleBodyFn?.(true);
     const mergedText = uniqSortedISO([...detected, ...parseISOListFromText(st.datesText || "")]).join(", ");
-    setStatus(`Daily check (${todayDhaka}) → missing ${detected.length}\nRunning sync now…`);
+    setStatus(`Auto-check → missing ${detected.length}\nRunning sync now…`);
     await startRunFromEmployeePage(setStatus, mergedText);
   }
 
+  function setupIntervalSchedulerStatus(setStatus) {
+    const path = location.pathname.replace(/\/+$/, "");
+    if (path !== "/employee") return;
+
+    const st = getSyncState();
+    const payload = st.payload || getDefaultTexts();
+    if (!st.syncEnabled || st.paused || !payload.autoDaily) return;
+
+    const now = Date.now();
+    const nextAt = st.nextCheckAt || (now + SYNC_CHECK_INTERVAL_MS);
+    if (!st.nextCheckAt) setSyncState((s) => { s.nextCheckAt = nextAt; return s; });
+
+    setStatus(
+      `Sync running.\n` +
+      `Auto-check interval: ${SYNC_CHECK_EVERY_MINUTES} min\n` +
+      `Next scheduled check: ${formatDhakaDateTime(nextAt)} (BD)\n` +
+      `KeepAlive: ${KeepAlive.isRunning() ? "ON" : "OFF"}`
+    );
+  }
+
   // -------------------------
-  // SPA route change hook (so widget doesn't "disappear")
+  // SPA route change hook
   // -------------------------
   function hookHistory(onChange) {
-    const fire = () => { try { onChange(); } catch {} };
+    const fire = () => { try { onChange(); } catch (e) { LOG.e("init error", e); } };
     const wrap = (fn) => function(...args) { const r = fn.apply(this, args); setTimeout(fire, 0); return r; };
     history.pushState = wrap(history.pushState);
     history.replaceState = wrap(history.replaceState);
@@ -1188,25 +1354,27 @@ Help Team with Automation;`;
     const path = location.pathname.replace(/\/+$/, "");
 
     if (path === "/employee") {
-      const { setStatus, toggleBody } = createWidget("employee");
+      const api = createOrUpdateWidget("employee");
+      const { setStatus, toggleBody } = api;
 
-      // if syncEnabled & not paused & autoDaily -> keepalive ON
       const st = getSyncState();
       const payload = st.payload || getDefaultTexts();
+
       if (st.syncEnabled && !st.paused && payload.autoDaily) {
-        // KeepAlive tick also handles drift-safe "new day" detection
-        KeepAlive.start(() => maybeDailyReloadOrRun(setStatus));
+        KeepAlive.start(() => maybeIntervalReloadOrRun(setStatus));
       } else {
         KeepAlive.stop();
       }
 
-      setupMidnightRefresh(setStatus);
+      setupIntervalSchedulerStatus(setStatus);
       await afterReloadAutoRunIfMissing(setStatus, toggleBody);
       return;
     }
 
     if (path === "/employee/standup-form") {
-      const { setStatus } = createWidget("standup-form");
+      const api = createOrUpdateWidget("standup-form");
+      const { setStatus } = api;
+
       try {
         await runStepOnStandupForm(setStatus);
       } catch (err) {
@@ -1220,12 +1388,8 @@ Help Team with Automation;`;
       }
       return;
     }
-
-    // outside intended pages: do nothing
   }
 
   hookHistory(initForCurrentPath);
-
-  // run once
   initForCurrentPath();
 })();
