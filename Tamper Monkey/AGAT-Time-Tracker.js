@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AGT Time Tracking - Range Auto Entry (skip weekends + exclusions) [date-compare fix]
+// @name         AGT Time Tracking - Month→Today Auto Fill (1am→5pm + Overtime Auto-Tick/Confirm)
 // @namespace    https://allgentech.io/
-// @version      0.6.1
-// @description  Navigate calendar month/year, click day tiles, verify modal date (robust), set start/end time, click Create for each date in range (end inclusive). Supports Skip Weekends + Excluded Dates.
+// @version      0.4.0
+// @description  Auto-fill entries from 1st of current month to today; default 01:00→17:00; skip weekends default ON; excluded dates textarea; only days with "Add Entry". If overtime appears: auto-tick all projects + approvals, and optionally auto-confirm overtime. If "Are you a time traveler?" error appears while submitting, reload page and treat as complete.
 // @match        https://allgentech.io/employee/time-tracking*
 // @run-at       document-idle
 // @grant        none
@@ -11,98 +11,59 @@
 (() => {
   "use strict";
 
+  // -----------------------------
+  // Defaults (forced on first run; UI still editable)
+  // -----------------------------
+  const DEFAULT_START_TIME = "01:00";
+  const DEFAULT_END_TIME = "17:00";
+  const DEFAULT_SKIP_WEEKENDS = true;
+
+  // ✅ Overtime automation defaults (ON by default)
+  const DEFAULT_AUTO_TICK_OVERTIME = true;     // ticks all overtime checkboxes (projects + approvals)
+  const DEFAULT_AUTO_CONFIRM_OVERTIME = true;  // clicks "Confirm Overtime" (you asked default ON)
+
+  // ✅ Bumped KEY so prior saved prefs won't keep overtime toggles OFF
+  const PREF_KEY = "agt_tt_month_to_today_prefs_v3";
+
+  const MODAL_TIMEOUT_MS = 12000;
+  const MODAL_CLOSE_TIMEOUT_MS = 15 * 60 * 1000; // allow time for manual overtime confirmations
+  const HEADER_CHANGE_TIMEOUT_MS = 6000;
+  const MAX_CLICKS = 240;
+
+  const TIME_TRAVELER_TEXT = "Are you a time traveler? Please select a valid date";
+  const TIME_TRAVELER_SESSION_KEY = "agt_tt_time_traveler_complete";
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const pad2 = (n) => String(n).padStart(2, "0");
+  const toYMDKey = (y, m, d) => `${y}-${pad2(m + 1)}-${pad2(d)}`;
+
   const MONTHS = [
     "January","February","March","April","May","June",
     "July","August","September","October","November","December",
   ];
   const MONTHS_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
-  const PREF_KEY = "agt_tt_auto_entry_prefs_v6_1";
-
-  const HEADER_CHANGE_TIMEOUT_MS = 6000;
-  const MAX_CLICKS = 240;
-
-  const MODAL_TIMEOUT_MS = 9000;
-  const MODAL_CLOSE_TIMEOUT_MS = 14000;
-
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-  function monthNameToIndex(name) {
-    return MONTHS.findIndex((m) => m.toLowerCase() === String(name).toLowerCase());
-  }
-
-  function parseMonthYear(text) {
-    const t = String(text || "").trim().replace(/\s+/g, " ");
-    const m = t.match(/^([A-Za-z]+)\s+(\d{4})$/);
-    if (!m) return null;
-    const monthIdx = monthNameToIndex(m[1]);
-    const year = Number(m[2]);
-    if (monthIdx < 0 || !Number.isFinite(year)) return null;
-    return { monthIdx, year, raw: t };
-  }
-
-  function ymToSerial(year, monthIdx) {
-    return year * 12 + monthIdx;
-  }
-
-  function daysInMonth(year, monthIdx) {
-    return new Date(year, monthIdx + 1, 0).getDate();
-  }
-
-  function pad2(n) {
-    return String(n).padStart(2, "0");
-  }
-
-  function toYMDKey(year, monthIdx, day) {
-    return `${year}-${pad2(monthIdx + 1)}-${pad2(day)}`;
-  }
-
-  function isValidYMD(year, monthIdx, day) {
-    const d = new Date(year, monthIdx, day);
-    return d.getFullYear() === year && d.getMonth() === monthIdx && d.getDate() === day;
-  }
-
-  function dispatchValueEvents(el) {
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-
+  // -----------------------------
+  // Storage
+  // -----------------------------
   function loadPrefs() {
     try {
       const raw = localStorage.getItem(PREF_KEY);
-      if (!raw) return null;
-      return JSON.parse(raw);
+      return raw ? JSON.parse(raw) : null;
     } catch {
       return null;
     }
   }
-
   function savePrefs(p) {
-    try {
-      localStorage.setItem(PREF_KEY, JSON.stringify(p));
-    } catch {}
+    try { localStorage.setItem(PREF_KEY, JSON.stringify(p)); } catch {}
   }
 
-  // --- NEW: normalize modal date like "Jan 03, 2024" or "Jan 3, 2024"
-  function parseModalDateString(s) {
-    const t = String(s || "").trim().replace(/\s+/g, " ");
-    // Jan 03, 2024  (day can be 1 or 2 digits)
-    const m = t.match(/^([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{4})$/);
-    if (!m) return null;
-
-    const mon3 = m[1].toLowerCase();
-    const monthIdx = MONTHS_SHORT.map((x) => x.toLowerCase()).indexOf(mon3);
-    if (monthIdx < 0) return null;
-
-    const day = Number(m[2]); // handles "03" -> 3
-    const year = Number(m[3]);
-    if (!isValidYMD(year, monthIdx, day)) return null;
-
-    return { year, monthIdx, day, key: toYMDKey(year, monthIdx, day) };
-  }
-
-  function expectedKey(year, monthIdx, day) {
-    return toYMDKey(year, monthIdx, day);
+  // -----------------------------
+  // Date parsing & exclusions
+  // -----------------------------
+  function isValidYMD(year, monthIdx, day) {
+    const d = new Date(year, monthIdx, day);
+    return d.getFullYear() === year && d.getMonth() === monthIdx && d.getDate() === day;
   }
 
   function parseExcludedDatesToSet(text) {
@@ -115,83 +76,105 @@
     for (const p of parts) {
       let y, m, d;
 
-      let m1 = p.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
+      // YYYY-MM-DD or YYYY/MM/DD
+      const m1 = p.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
       if (m1) {
-        y = Number(m1[1]);
-        m = Number(m1[2]) - 1;
-        d = Number(m1[3]);
+        y = Number(m1[1]); m = Number(m1[2]) - 1; d = Number(m1[3]);
         if (isValidYMD(y, m, d)) set.add(toYMDKey(y, m, d));
         continue;
       }
 
-      let m2 = p.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      // MM/DD/YYYY
+      const m2 = p.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
       if (m2) {
-        m = Number(m2[1]) - 1;
-        d = Number(m2[2]);
-        y = Number(m2[3]);
+        m = Number(m2[1]) - 1; d = Number(m2[2]); y = Number(m2[3]);
         if (isValidYMD(y, m, d)) set.add(toYMDKey(y, m, d));
         continue;
       }
 
-      let m3 = p.match(/^([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})$/);
+      // "Dec 22, 2025" or "December 22, 2025"
+      const m3 = p.match(/^([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})$/);
       if (m3) {
-        const monthIdx = MONTHS_SHORT.map((x) => x.toLowerCase()).indexOf(m3[1].slice(0,3).toLowerCase());
+        const mon3 = m3[1].slice(0,3).toLowerCase();
+        const monthIdx = MONTHS_SHORT.map((x) => x.toLowerCase()).indexOf(mon3);
         if (monthIdx >= 0) {
-          y = Number(m3[3]);
-          m = monthIdx;
-          d = Number(m3[2]);
+          y = Number(m3[3]); m = monthIdx; d = Number(m3[2]);
           if (isValidYMD(y, m, d)) set.add(toYMDKey(y, m, d));
         }
       }
     }
-
     return set;
   }
 
-  function buildDateRange(startY, startM, startD, endY, endM, endD) {
-    if (!isValidYMD(startY, startM, startD)) {
-      throw new Error(`Start date is invalid: ${MONTHS[startM]} ${startD}, ${startY}`);
-    }
-    if (!isValidYMD(endY, endM, endD)) {
-      throw new Error(`End date is invalid: ${MONTHS[endM]} ${endD}, ${endY}`);
+  // Modal date can be:
+  // - "Jan 7, 2026"
+  // - "Jan 07, 2026"
+  // - sometimes "2026-01-07" (fallback)
+  function parseModalDateString(s) {
+    const t = String(s || "").trim().replace(/\s+/g, " ");
+
+    let m = t.match(/^([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{4})$/);
+    if (m) {
+      const mon3 = m[1].toLowerCase();
+      const monthIdx = MONTHS_SHORT.map((x) => x.toLowerCase()).indexOf(mon3);
+      if (monthIdx < 0) return null;
+      const day = Number(m[2]);
+      const year = Number(m[3]);
+      if (!isValidYMD(year, monthIdx, day)) return null;
+      return { year, monthIdx, day, key: toYMDKey(year, monthIdx, day), raw: t };
     }
 
-    const start = new Date(startY, startM, startD);
-    const end = new Date(endY, endM, endD);
-    if (end < start) throw new Error("End date is before Start date. Please fix the range.");
+    m = t.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) {
+      const year = Number(m[1]);
+      const monthIdx = Number(m[2]) - 1;
+      const day = Number(m[3]);
+      if (!isValidYMD(year, monthIdx, day)) return null;
+      return { year, monthIdx, day, key: toYMDKey(year, monthIdx, day), raw: t };
+    }
+
+    return null;
+  }
+
+  // ✅ Start of month → today (current month)
+  function buildDateRangeMonthToToday(skipWeekends, excludedSet) {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = now.getMonth();
+    const today = now.getDate();
 
     const out = [];
-    const cur = new Date(start);
-    while (cur <= end) {
-      out.push({ year: cur.getFullYear(), monthIdx: cur.getMonth(), day: cur.getDate() });
-      cur.setDate(cur.getDate() + 1);
+    for (let d = 1; d <= today; d++) {
+      const jsDate = new Date(y, m, d);
+      const dow = jsDate.getDay(); // 0 Sun .. 6 Sat
+      const key = toYMDKey(y, m, d);
+
+      if (skipWeekends && (dow === 0 || dow === 6)) continue;
+      if (excludedSet.has(key)) continue;
+
+      out.push({ year: y, monthIdx: m, day: d });
     }
     return out;
   }
 
-  function applyFilters(dates, skipWeekends, excludedSet) {
-    const kept = [];
-    let skippedWeekend = 0;
-    let skippedExcluded = 0;
-
-    for (const dt of dates) {
-      const jsDate = new Date(dt.year, dt.monthIdx, dt.day);
-      const dow = jsDate.getDay(); // 0 Sun .. 6 Sat
-      const key = toYMDKey(dt.year, dt.monthIdx, dt.day);
-
-      if (skipWeekends && (dow === 0 || dow === 6)) {
-        skippedWeekend++;
-        continue;
-      }
-      if (excludedSet.has(key)) {
-        skippedExcluded++;
-        continue;
-      }
-      kept.push(dt);
-    }
-
-    return { kept, skippedWeekend, skippedExcluded };
+  // -----------------------------
+  // Calendar navigation
+  // -----------------------------
+  function monthNameToIndex(name) {
+    return MONTHS.findIndex((mm) => mm.toLowerCase() === String(name).toLowerCase());
   }
+
+  function parseMonthYear(text) {
+    const t = String(text || "").trim().replace(/\s+/g, " ");
+    const m = t.match(/^([A-Za-z]+)\s+(\d{4})$/);
+    if (!m) return null;
+    const monthIdx = monthNameToIndex(m[1]);
+    const year = Number(m[2]);
+    if (monthIdx < 0 || !Number.isFinite(year)) return null;
+    return { monthIdx, year, raw: t };
+  }
+
+  function ymToSerial(year, monthIdx) { return year * 12 + monthIdx; }
 
   function findMonthHeaderEl() {
     const headers = Array.from(document.querySelectorAll("h1,h2,h3"));
@@ -221,7 +204,6 @@
   async function waitForHeaderChange(headerEl, oldText, timeoutMs) {
     const start = Date.now();
     const old = String(oldText || "").trim();
-
     if (!headerEl) return false;
     if (String(headerEl.textContent || "").trim() !== old) return true;
 
@@ -300,35 +282,44 @@
     }
   }
 
-  function findDayTile(day) {
-    const dayStr = String(day);
+  // -----------------------------
+  // Tile finding (exact day match + Add Entry)
+  // -----------------------------
+  function getCalendarTileCandidates() {
     const allDivs = Array.from(document.querySelectorAll("div"));
-    const candidates = allDivs.filter((el) => {
+    return allDivs.filter((el) => {
       const cls = el.className || "";
       return (
         typeof cls === "string" &&
         cls.includes("min-h-[120px]") &&
         cls.includes("border-gray-200") &&
         cls.includes("rounded-lg") &&
-        cls.includes("cursor-pointer")
+        cls.includes("cursor-pointer") // grey prev/next month tiles don’t have cursor-pointer in your markup
       );
     });
-
-    const withAddEntry = candidates.find((c) => c.textContent?.includes("Add Entry") && c.textContent?.includes(dayStr));
-    if (withAddEntry) return withAddEntry;
-
-    const withDay = candidates.find((c) => Array.from(c.querySelectorAll("div")).some((d) => d.textContent?.trim() === dayStr));
-    if (withDay) return withDay;
-
-    const dayLabel = Array.from(document.querySelectorAll("div"))
-      .find((d) => d.textContent?.trim() === dayStr && typeof d.className === "string" && d.className.includes("text-sm"));
-    if (dayLabel) {
-      const tile = dayLabel.closest('div[class*="cursor-pointer"]');
-      if (tile) return tile;
-    }
-    return null;
   }
 
+  function getTileDayNumber(tile) {
+    const el =
+      tile.querySelector('div.text-sm.font-medium.mb-2') ||
+      tile.querySelector('div[class*="text-sm"][class*="font-medium"][class*="mb-2"]');
+
+    const n = Number((el?.textContent || "").trim());
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function findDayTilesWithAddEntry(day) {
+    const want = Number(day);
+    return getCalendarTileCandidates().filter((t) => {
+      if (!(t.textContent || "").includes("Add Entry")) return false;
+      const n = getTileDayNumber(t);
+      return n === want; // exact match: 7 != 17 != 27
+    });
+  }
+
+  // -----------------------------
+  // Modal helpers
+  // -----------------------------
   function getOpenModalBox() {
     const boxes = Array.from(document.querySelectorAll(".modal-box"));
     if (!boxes.length) return null;
@@ -350,16 +341,6 @@
     return null;
   }
 
-  async function waitForModalClose(timeoutMs) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const box = getOpenModalBox();
-      if (!box) return true;
-      await sleep(120);
-    }
-    return false;
-  }
-
   function readModalDateValue(modalBox) {
     const dateInput =
       modalBox.querySelector('input[type="text"][placeholder*="Select a date"]') ||
@@ -368,16 +349,74 @@
     return (dateInput?.value || "").trim();
   }
 
+  function timeTravelerErrorPresent(modalBox) {
+    if (!modalBox) return false;
+    const spans = Array.from(
+      modalBox.querySelectorAll("span.label-text-alt.text-error, span.text-error, .label-text-alt.text-error, .text-error")
+    );
+    return spans.some((s) => (s.textContent || "").includes(TIME_TRAVELER_TEXT));
+  }
+
+  let timeTravelerReloadTriggered = false;
+
+  function triggerTimeTravelerReload(modalBox, context = {}) {
+    if (timeTravelerReloadTriggered) return;
+    timeTravelerReloadTriggered = true;
+    abortFlag = true;
+
+    try {
+      const payload = {
+        at: new Date().toISOString(),
+        dateValue: readModalDateValue(modalBox),
+        context,
+      };
+      sessionStorage.setItem(TIME_TRAVELER_SESSION_KEY, JSON.stringify(payload));
+    } catch {}
+
+    try {
+      location.reload();
+    } catch {
+      // If reload fails for any reason, we at least stop
+    }
+  }
+
+  async function waitForModalCloseOrTimeTraveler(timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const box = getOpenModalBox();
+      if (!box) return { closed: true };
+
+      if (timeTravelerErrorPresent(box)) {
+        triggerTimeTravelerReload(box, { stage: "waiting_for_close" });
+        return { closed: false, timeTraveler: true };
+      }
+
+      await sleep(150);
+    }
+    return { closed: false, timeout: true };
+  }
+
+  // React-controlled inputs: must use native value setter
+  function setNativeValue(el, value) {
+    const proto = el instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc?.set) desc.set.call(el, value);
+    else el.value = value;
+
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
   function setModalTime(modalBox, startTimeHHMM, endTimeHHMM) {
     const startEl = modalBox.querySelector('input[type="time"][name="startTime"]');
     const endEl = modalBox.querySelector('input[type="time"][name="endTime"]');
     if (!startEl || !endEl) throw new Error("Could not find startTime/endTime inputs in modal.");
 
-    startEl.value = startTimeHHMM;
-    dispatchValueEvents(startEl);
-
-    endEl.value = endTimeHHMM;
-    dispatchValueEvents(endEl);
+    setNativeValue(startEl, startTimeHHMM);
+    setNativeValue(endEl, endTimeHHMM);
   }
 
   function clickModalSubmit(modalBox) {
@@ -389,62 +428,236 @@
     (createBtn || updateBtn || submits[0]).click();
   }
 
-  async function addEntryForDate({ year, monthIdx, day }, startTime, endTime, setStatus) {
-    if (abortFlag) throw new Error("STOP_REQUESTED");
-
-    const tile = findDayTile(day);
-    if (!tile) throw new Error(`Could not find the day tile for ${day} on the calendar view.`);
-
-    tile.scrollIntoView({ block: "center", inline: "center" });
-    await new Promise((r) => requestAnimationFrame(r));
-    await sleep(90);
-    tile.click();
-
-    const modal = await waitForModalOpen(MODAL_TIMEOUT_MS);
-    if (!modal) throw new Error("Modal did not open after clicking day tile.");
-
-    // ✅ Robust compare using YYYY-MM-DD key
-    const expected = expectedKey(year, monthIdx, day);
-    const actualStr = readModalDateValue(modal);
-    const parsed = parseModalDateString(actualStr);
-    if (!parsed) throw new Error(`Could not parse modal date: "${actualStr}"`);
-
-    if (parsed.key !== expected) {
-      throw new Error(`Modal date mismatch. Expected "${expected}" but found "${parsed.key}" (raw: "${actualStr}")`);
-    }
-
-    setStatus(`Filling modal for ${actualStr} (${startTime} → ${endTime})...`);
-    setModalTime(modal, startTime, endTime);
-
-    clickModalSubmit(modal);
-
-    const closed = await waitForModalClose(MODAL_CLOSE_TIMEOUT_MS);
-    if (!closed) throw new Error("Clicked submit, but modal did not close (maybe validation error?).");
-
-    await sleep(180);
+  function findProceedWithOvertimeButton(modalBox) {
+    const btns = Array.from(modalBox.querySelectorAll('button[type="button"]'));
+    return btns.find((b) => (b.textContent || "").trim().toLowerCase() === "proceed with overtime");
   }
 
-  // ---------------------------
-  // Widget UI
-  // ---------------------------
+  function overtimePanelPresent(modalBox) {
+    // alert panel includes "Overtime Detected!"
+    const alerts = Array.from(modalBox.querySelectorAll(".alert"));
+    return alerts.some((a) => (a.textContent || "").includes("Overtime Detected!"));
+  }
 
+  // Overtime panel + auto-tick + auto-confirm helpers
+  function findOvertimePanel(modalBox) {
+    const amber = modalBox.querySelector(".alert.bg-amber-50");
+    if (amber && (amber.textContent || "").includes("Overtime Detected")) return amber;
+
+    const all = Array.from(modalBox.querySelectorAll("div,section,article"));
+    return all.find((el) =>
+      (el.textContent || "").includes("Please confirm the following to proceed with overtime:")
+    ) || null;
+  }
+
+  async function waitForOvertimePanel(modalBox, timeoutMs = 2500) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const p = findOvertimePanel(modalBox);
+      if (p) return p;
+      await sleep(100);
+    }
+    return null;
+  }
+
+  function clickCheckbox(el) {
+    if (!el) return false;
+    if (el.disabled) return false;
+
+    const id = el.getAttribute("id");
+    if (id) {
+      const lbl = el.ownerDocument.querySelector(`label[for="${CSS.escape(id)}"]`);
+      if (lbl) {
+        lbl.click();
+        return true;
+      }
+    }
+    el.click();
+    return true;
+  }
+
+  async function autoTickOvertimeCheckboxes(modalBox, setStatus) {
+    const panel = await waitForOvertimePanel(modalBox, 2500);
+    if (!panel) {
+      setStatus?.("⚠️ Overtime panel not found to auto-tick.");
+      return { found: 0, ticked: 0 };
+    }
+
+    const boxes = Array.from(panel.querySelectorAll('input[type="checkbox"]'));
+    let ticked = 0;
+
+    for (const cb of boxes) {
+      if (timeTravelerErrorPresent(modalBox)) {
+        triggerTimeTravelerReload(modalBox, { stage: "auto_tick" });
+        return { found: boxes.length, ticked };
+      }
+      if (!cb.checked) {
+        clickCheckbox(cb);
+        ticked++;
+        await sleep(80);
+      }
+    }
+
+    return { found: boxes.length, ticked };
+  }
+
+  function clickConfirmOvertime(modalBox) {
+    const btns = Array.from(modalBox.querySelectorAll('button[type="submit"]'));
+    const target = btns.find((b) => (b.textContent || "").trim().toLowerCase() === "confirm overtime");
+    (target || btns[0])?.click();
+  }
+
+  async function openCorrectModalForDate({ year, monthIdx, day }) {
+    const expectedKey = toYMDKey(year, monthIdx, day);
+    const candidates = findDayTilesWithAddEntry(day);
+    if (!candidates.length) return { modal: null, reason: "NO_ADD_ENTRY" };
+
+    for (const tile of candidates) {
+      if (abortFlag) throw new Error("STOP_REQUESTED");
+
+      tile.scrollIntoView({ block: "center", inline: "center" });
+      await new Promise((r) => requestAnimationFrame(r));
+      await sleep(80);
+      tile.click();
+
+      const modal = await waitForModalOpen(MODAL_TIMEOUT_MS);
+      if (!modal) continue;
+
+      const actualStr = readModalDateValue(modal);
+      const parsed = parseModalDateString(actualStr);
+
+      if (parsed && parsed.key === expectedKey) {
+        return { modal, reason: "OK" };
+      }
+
+      // Wrong tile (duplicate day from another month) -> close and try next
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await sleep(150);
+      await waitForModalCloseOrTimeTraveler(2500);
+      await sleep(80);
+    }
+
+    return { modal: null, reason: "DATE_MISMATCH" };
+  }
+
+  async function addEntryForDate(dt, startTime, endTime, autoTickOvertime, autoConfirmOvertime, setStatus) {
+    if (abortFlag) throw new Error("STOP_REQUESTED");
+
+    const ymd = toYMDKey(dt.year, dt.monthIdx, dt.day);
+    const opened = await openCorrectModalForDate(dt);
+
+    if (!opened.modal) {
+      if (opened.reason === "NO_ADD_ENTRY") {
+        return { skipped: true, ymd, why: "NO_ADD_ENTRY" };
+      }
+      throw new Error(`Could not open correct modal for ${ymd}. Reason: ${opened.reason}`);
+    }
+
+    const modal = opened.modal;
+
+    // verify date
+    const actualStr = readModalDateValue(modal);
+    const parsed = parseModalDateString(actualStr);
+    if (!parsed || parsed.key !== ymd) {
+      throw new Error(`Modal date mismatch. Expected "${ymd}" but found "${parsed?.key || "UNPARSEABLE"}" (raw: "${actualStr}")`);
+    }
+
+    // fill time
+    setStatus(`Filling ${ymd}: ${startTime} → ${endTime}`);
+    setModalTime(modal, startTime, endTime);
+    await sleep(250);
+
+    // auto-click "Proceed with Overtime" if present
+    const proceedBtn = findProceedWithOvertimeButton(modal);
+    if (proceedBtn) {
+      proceedBtn.click();
+      await sleep(350);
+    }
+
+    // If overtime panel is present...
+    if (overtimePanelPresent(modal)) {
+      if (autoTickOvertime) {
+        setStatus(`⚠️ Overtime detected for ${ymd}.\nAuto-ticking overtime checkboxes...`);
+        const res = await autoTickOvertimeCheckboxes(modal, setStatus);
+        await sleep(200);
+        setStatus(
+          `⚠️ Overtime detected for ${ymd}.\n` +
+          `Auto-ticked: ${res.ticked}/${res.found} checkboxes.\n\n` +
+          (autoConfirmOvertime
+            ? `Auto-confirm is ON. Attempting to submit overtime...`
+            : `Auto-confirm is OFF. Review selections, then submit manually if you want.`)
+        );
+      } else {
+        setStatus(
+          `⚠️ Overtime detected for ${ymd}.\n` +
+          `Auto-tick is OFF.\n\n` +
+          `Review projects + approvals manually.`
+        );
+      }
+
+      if (autoConfirmOvertime) {
+        await sleep(250);
+        clickConfirmOvertime(modal);
+
+        // ✅ While waiting, if time traveler error appears => reload + complete
+        const w = await waitForModalCloseOrTimeTraveler(20000);
+        if (w.timeTraveler) return { skipped: false, ymd, why: "TIME_TRAVELER_RELOAD" };
+        if (!w.closed) throw new Error(`Clicked "Confirm Overtime" for ${ymd}, but modal did not close (validation error?).`);
+
+        await sleep(150);
+        return { skipped: false, ymd, why: "AUTO_CONFIRMED_OVERTIME" };
+      }
+
+      // Manual close path (still watching for time traveler error)
+      setStatus(
+        `⚠️ Overtime detected for ${ymd}.\n\n` +
+        (autoTickOvertime ? `I ticked all projects + approvals (if found).\n\n` : ``) +
+        `Now YOU may:\n` +
+        `• Review selections\n` +
+        `• Click Confirm Overtime (or Cancel)\n\n` +
+        `Waiting for modal to close...`
+      );
+
+      const w = await waitForModalCloseOrTimeTraveler(MODAL_CLOSE_TIMEOUT_MS);
+      if (w.timeTraveler) return { skipped: false, ymd, why: "TIME_TRAVELER_RELOAD" };
+      if (!w.closed) throw new Error(`Timed out waiting for overtime modal to close for ${ymd}.`);
+
+      await sleep(150);
+      return { skipped: false, ymd, why: autoTickOvertime ? "MANUAL_OVERTIME_AFTER_AUTOTICK" : "MANUAL_OVERTIME" };
+    }
+
+    // no overtime -> auto submit
+    clickModalSubmit(modal);
+
+    // ✅ Watch for time traveler error while waiting for close
+    const w = await waitForModalCloseOrTimeTraveler(20000);
+    if (w.timeTraveler) return { skipped: false, ymd, why: "TIME_TRAVELER_RELOAD" };
+    if (!w.closed) throw new Error(`Clicked submit for ${ymd}, but modal did not close (validation error?).`);
+
+    await sleep(150);
+    return { skipped: false, ymd, why: "AUTO_SUBMITTED" };
+  }
+
+  // -----------------------------
+  // Widget UI
+  // -----------------------------
   function createWidget() {
     const root = document.createElement("div");
-    root.id = "agt-tt-auto-entry-widget";
+    root.id = "agt-tt-month-to-today-widget";
     root.style.cssText = `
       position: fixed;
       right: 14px;
       bottom: 14px;
       z-index: 999999;
-      width: 370px;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Liberation Sans", sans-serif;
+      width: 360px;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", sans-serif;
       color: #111827;
     `;
 
     root.innerHTML = `
       <div style="background: rgba(255,255,255,0.96);border: 1px solid rgba(0,0,0,0.12);border-radius: 12px;box-shadow: 0 10px 25px rgba(0,0,0,0.18);overflow: hidden;">
         <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(0,0,0,0.08);">
-          <div style="font-weight:700;font-size:13px;">Time Tracking Auto Entry</div>
+          <div style="font-weight:700;font-size:13px;">Month → Today Auto Fill</div>
           <button data-act="toggle" title="Minimize" style="border:none;background:transparent;cursor:pointer;font-size:14px;line-height:1;padding:4px 8px;border-radius:8px;">—</button>
         </div>
 
@@ -460,32 +673,6 @@
             </label>
           </div>
 
-          <div style="font-weight:700;font-size:12px;margin:10px 0 6px;">Start</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
-            <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;">Month
-              <select data-field="startMonth" style="padding:6px 8px;border:1px solid rgba(0,0,0,0.18);border-radius:8px;"></select>
-            </label>
-            <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;">Year
-              <select data-field="startYear" style="padding:6px 8px;border:1px solid rgba(0,0,0,0.18);border-radius:8px;"></select>
-            </label>
-            <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;">Day
-              <select data-field="startDay" style="padding:6px 8px;border:1px solid rgba(0,0,0,0.18);border-radius:8px;"></select>
-            </label>
-          </div>
-
-          <div style="font-weight:700;font-size:12px;margin:10px 0 6px;">End</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
-            <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;">Month
-              <select data-field="endMonth" style="padding:6px 8px;border:1px solid rgba(0,0,0,0.18);border-radius:8px;"></select>
-            </label>
-            <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;">Year
-              <select data-field="endYear" style="padding:6px 8px;border:1px solid rgba(0,0,0,0.18);border-radius:8px;"></select>
-            </label>
-            <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;">Day
-              <select data-field="endDay" style="padding:6px 8px;border:1px solid rgba(0,0,0,0.18);border-radius:8px;"></select>
-            </label>
-          </div>
-
           <div style="margin-top:10px;display:flex;align-items:center;gap:10px;">
             <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;user-select:none;">
               <input type="checkbox" data-field="skipWeekends" />
@@ -493,10 +680,22 @@
             </label>
           </div>
 
+          <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;user-select:none;">
+              <input type="checkbox" data-field="autoTickOvertime" />
+              Auto-tick overtime projects + approvals
+            </label>
+
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;user-select:none;">
+              <input type="checkbox" data-field="autoConfirmOvertime" />
+              Auto-confirm overtime
+            </label>
+          </div>
+
           <div style="margin-top:10px;">
             <label style="display:flex;flex-direction:column;gap:6px;font-size:12px;">
               Excluded dates (comma separated)
-              <textarea data-field="excludedDates" rows="2" placeholder="e.g. 2024-12-25, 12/31/2024, Dec 22, 2025"
+              <textarea data-field="excludedDates" rows="2" placeholder="e.g. 2026-01-02, 01/15/2026, Jan 20, 2026"
                 style="resize:vertical;padding:8px 10px;border:1px solid rgba(0,0,0,0.18);border-radius:10px;font-size:12px;line-height:1.35;"></textarea>
             </label>
           </div>
@@ -506,7 +705,7 @@
             <button data-act="stop"  style="padding:8px 10px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:#ffffff;color:#111827;cursor:pointer;font-weight:600;font-size:13px;">Stop</button>
           </div>
 
-          <div data-status style="margin-top:10px;padding:8px 10px;border-radius:10px;background: rgba(17,24,39,0.06);font-size:12px;line-height:1.35;min-height: 74px;white-space: pre-wrap;">Ready.</div>
+          <div data-status style="margin-top:10px;padding:8px 10px;border-radius:10px;background: rgba(17,24,39,0.06);font-size:12px;line-height:1.35;min-height: 96px;white-space: pre-wrap;">Ready.</div>
         </div>
       </div>
     `;
@@ -517,114 +716,53 @@
     const statusEl = root.querySelector("[data-status]");
     const setStatus = (msg) => { statusEl.textContent = msg; };
 
+    // Show completion note after reload (time traveler)
+    try {
+      const raw = sessionStorage.getItem(TIME_TRAVELER_SESSION_KEY);
+      if (raw) {
+        sessionStorage.removeItem(TIME_TRAVELER_SESSION_KEY);
+        const info = JSON.parse(raw);
+        setStatus(
+          `✅ Considered complete.\n` +
+          `Detected: "${TIME_TRAVELER_TEXT}"\n` +
+          `Reloaded page.\n\n` +
+          `Modal date value was: ${info?.dateValue || "(unknown)"}\n` +
+          `Time: ${info?.at || "(unknown)"}`
+        );
+      }
+    } catch {}
+
     const startTimeEl = root.querySelector('input[data-field="startTime"]');
     const endTimeEl = root.querySelector('input[data-field="endTime"]');
-
-    const startMonthSel = root.querySelector('select[data-field="startMonth"]');
-    const startYearSel  = root.querySelector('select[data-field="startYear"]');
-    const startDaySel   = root.querySelector('select[data-field="startDay"]');
-
-    const endMonthSel = root.querySelector('select[data-field="endMonth"]');
-    const endYearSel  = root.querySelector('select[data-field="endYear"]');
-    const endDaySel   = root.querySelector('select[data-field="endDay"]');
-
     const skipWeekendsCb = root.querySelector('input[data-field="skipWeekends"]');
     const excludedDatesTa = root.querySelector('textarea[data-field="excludedDates"]');
 
-    // populate months
-    for (let i = 0; i < MONTHS.length; i++) {
-      const opt1 = document.createElement("option");
-      opt1.value = String(i);
-      opt1.textContent = MONTHS[i];
-      startMonthSel.appendChild(opt1);
+    const autoTickOvertimeCb = root.querySelector('input[data-field="autoTickOvertime"]');
+    const autoConfirmOvertimeCb = root.querySelector('input[data-field="autoConfirmOvertime"]');
 
-      const opt2 = document.createElement("option");
-      opt2.value = String(i);
-      opt2.textContent = MONTHS[i];
-      endMonthSel.appendChild(opt2);
-    }
-
-    // populate years
-    const now = new Date();
-    const currentYear = now.getFullYear();
-    const currentMonthIdx = now.getMonth();
-
-    for (let y = currentYear - 10; y <= currentYear + 3; y++) {
-      const o1 = document.createElement("option");
-      o1.value = String(y);
-      o1.textContent = String(y);
-      startYearSel.appendChild(o1);
-
-      const o2 = document.createElement("option");
-      o2.value = String(y);
-      o2.textContent = String(y);
-      endYearSel.appendChild(o2);
-    }
-
-    // populate days
-    for (let d = 1; d <= 31; d++) {
-      const o1 = document.createElement("option");
-      o1.value = String(d);
-      o1.textContent = String(d);
-      startDaySel.appendChild(o1);
-
-      const o2 = document.createElement("option");
-      o2.value = String(d);
-      o2.textContent = String(d);
-      endDaySel.appendChild(o2);
-    }
-
-    // defaults
-    const defaultStartYear = currentYear;
-    const defaultStartMonthIdx = currentMonthIdx;
-    const defaultStartDay = 1;
-
-    const defaultEndYear = currentYear;
-    const defaultEndMonthIdx = currentMonthIdx;
-    const defaultEndDay = daysInMonth(defaultEndYear, defaultEndMonthIdx);
-
+    // Load prefs (but use defaults if missing)
     const prefs = loadPrefs();
-
-    startTimeEl.value = String(prefs?.startTime ?? "09:00");
-    endTimeEl.value = String(prefs?.endTime ?? "17:00");
-
-    startMonthSel.value = String(prefs?.startMonthIdx ?? defaultStartMonthIdx);
-    startYearSel.value  = String(prefs?.startYear ?? defaultStartYear);
-    startDaySel.value   = String(prefs?.startDay ?? defaultStartDay);
-
-    endMonthSel.value = String(prefs?.endMonthIdx ?? defaultEndMonthIdx);
-    endYearSel.value  = String(prefs?.endYear ?? defaultEndYear);
-    endDaySel.value   = String(prefs?.endDay ?? defaultEndDay);
-
-    skipWeekendsCb.checked = Boolean(prefs?.skipWeekends ?? false);
+    startTimeEl.value = String(prefs?.startTime ?? DEFAULT_START_TIME);
+    endTimeEl.value = String(prefs?.endTime ?? DEFAULT_END_TIME);
+    skipWeekendsCb.checked = Boolean(prefs?.skipWeekends ?? DEFAULT_SKIP_WEEKENDS);
     excludedDatesTa.value = String(prefs?.excludedDates ?? "");
+
+    autoTickOvertimeCb.checked = Boolean(prefs?.autoTickOvertime ?? DEFAULT_AUTO_TICK_OVERTIME);
+    autoConfirmOvertimeCb.checked = Boolean(prefs?.autoConfirmOvertime ?? DEFAULT_AUTO_CONFIRM_OVERTIME);
 
     function persist() {
       savePrefs({
-        startTime: String(startTimeEl.value || "09:00"),
-        endTime: String(endTimeEl.value || "17:00"),
-        startMonthIdx: Number(startMonthSel.value),
-        startYear: Number(startYearSel.value),
-        startDay: Number(startDaySel.value),
-        endMonthIdx: Number(endMonthSel.value),
-        endYear: Number(endYearSel.value),
-        endDay: Number(endDaySel.value),
+        startTime: String(startTimeEl.value || DEFAULT_START_TIME),
+        endTime: String(endTimeEl.value || DEFAULT_END_TIME),
         skipWeekends: Boolean(skipWeekendsCb.checked),
         excludedDates: String(excludedDatesTa.value || ""),
+
+        autoTickOvertime: Boolean(autoTickOvertimeCb.checked),
+        autoConfirmOvertime: Boolean(autoConfirmOvertimeCb.checked),
       });
     }
 
-    function syncEndDayToLastOfMonth() {
-      const y = Number(endYearSel.value);
-      const m = Number(endMonthSel.value);
-      endDaySel.value = String(daysInMonth(y, m));
-    }
-
-    root.addEventListener("change", (e) => {
-      const t = e.target;
-      if (t === endMonthSel || t === endYearSel) syncEndDayToLastOfMonth();
-      persist();
-    });
+    root.addEventListener("change", persist);
     root.addEventListener("input", persist);
 
     root.addEventListener("click", async (e) => {
@@ -650,60 +788,82 @@
       if (act !== "start") return;
 
       abortFlag = false;
+      timeTravelerReloadTriggered = false;
       persist();
 
-      const startTime = String(startTimeEl.value || "09:00");
-      const endTime = String(endTimeEl.value || "17:00");
-
-      const startMonthIdx = Number(startMonthSel.value);
-      const startYear = Number(startYearSel.value);
-      const startDay = Number(startDaySel.value);
-
-      const endMonthIdx = Number(endMonthSel.value);
-      const endYear = Number(endYearSel.value);
-      const endDay = Number(endDaySel.value);
-
+      const startTime = String(startTimeEl.value || DEFAULT_START_TIME);
+      const endTime = String(endTimeEl.value || DEFAULT_END_TIME);
       const skipWeekends = Boolean(skipWeekendsCb.checked);
       const excludedSet = parseExcludedDatesToSet(excludedDatesTa.value);
 
+      const autoTickOvertime = Boolean(autoTickOvertimeCb.checked);
+      const autoConfirmOvertime = Boolean(autoConfirmOvertimeCb.checked);
+
+      const now = new Date();
+      const targetYear = now.getFullYear();
+      const targetMonthIdx = now.getMonth();
+      const today = now.getDate();
+
       try {
-        const allDates = buildDateRange(startYear, startMonthIdx, startDay, endYear, endMonthIdx, endDay);
-        const { kept, skippedWeekend, skippedExcluded } = applyFilters(allDates, skipWeekends, excludedSet);
+        const range = buildDateRangeMonthToToday(skipWeekends, excludedSet);
 
         setStatus(
-          `Total in range: ${allDates.length}\n` +
-          `Will process: ${kept.length}\n` +
-          `Skipped weekends: ${skippedWeekend}\n` +
-          `Skipped excluded: ${skippedExcluded}\n` +
-          `Time: ${startTime} → ${endTime}\n\n` +
-          `Navigating to start month/year...`
+          `Debug local date: ${now.toString()}\n\n` +
+          `Range: ${toYMDKey(targetYear, targetMonthIdx, 1)} → ${toYMDKey(targetYear, targetMonthIdx, today)}\n` +
+          `Candidates (after filters): ${range.length}\n` +
+          `Time to set: ${startTime} → ${endTime}\n` +
+          `Overtime: auto-tick=${autoTickOvertime ? "ON" : "OFF"}, auto-confirm=${autoConfirmOvertime ? "ON" : "OFF"}\n\n` +
+          `Navigating to current month...`
         );
 
-        if (!kept.length) return;
+        await navigateTo(targetYear, targetMonthIdx, (m) => setStatus(`Navigating...\n${m}`));
 
-        await navigateTo(startYear, startMonthIdx, (m) => setStatus(`Navigating to start...\n${m}`));
+        let processed = 0;
+        let skippedNoAdd = 0;
 
-        for (let i = 0; i < kept.length; i++) {
+        for (let i = 0; i < range.length; i++) {
           if (abortFlag) throw new Error("STOP_REQUESTED");
 
-          const d = kept[i];
-          const ymd = toYMDKey(d.year, d.monthIdx, d.day);
+          const dt = range[i];
+          const ymd = toYMDKey(dt.year, dt.monthIdx, dt.day);
 
-          await navigateTo(d.year, d.monthIdx, (m) => setStatus(`Working ${i + 1}/${kept.length}\n${m}\nDate: ${ymd}`));
+          const result = await addEntryForDate(
+            dt,
+            startTime,
+            endTime,
+            autoTickOvertime,
+            autoConfirmOvertime,
+            (msg) => setStatus(`Working ${i + 1}/${range.length}\n${msg}`)
+          );
 
-          await addEntryForDate(d, startTime, endTime, (msg) => setStatus(`Working ${i + 1}/${kept.length}\n${msg}\nDate: ${ymd}`));
+          // If we triggered reload due to time traveler, treat as complete and stop.
+          if (result?.why === "TIME_TRAVELER_RELOAD") {
+            // Reload should already be happening; just exit.
+            return;
+          }
 
-          setStatus(`✅ Created entry for ${ymd} (${startTime} → ${endTime})\nProgress: ${i + 1}/${kept.length}`);
+          if (result?.why === "NO_ADD_ENTRY") skippedNoAdd++;
+          else processed++;
+
+          setStatus(
+            `Progress: ${i + 1}/${range.length}\n` +
+            `Processed: ${processed}\n` +
+            `Skipped (no Add Entry): ${skippedNoAdd}\n` +
+            `Last: ${ymd} (${result?.why || "OK"})\n\n` +
+            `Time to set: ${startTime} → ${endTime}\n` +
+            `Overtime: auto-tick=${autoTickOvertime ? "ON" : "OFF"}, auto-confirm=${autoConfirmOvertime ? "ON" : "OFF"}`
+          );
+
           await sleep(200);
         }
 
         setStatus(
           `✅ Done.\n` +
-          `Created: ${kept.length}\n` +
-          `Total in range: ${allDates.length}\n` +
-          `Skipped weekends: ${skippedWeekend}\n` +
-          `Skipped excluded: ${skippedExcluded}\n` +
-          `Time: ${startTime} → ${endTime}`
+          `Processed: ${processed}\n` +
+          `Skipped (no Add Entry): ${skippedNoAdd}\n` +
+          `Range: ${toYMDKey(targetYear, targetMonthIdx, 1)} → ${toYMDKey(targetYear, targetMonthIdx, today)}\n` +
+          `Time set: ${startTime} → ${endTime}\n` +
+          `Overtime: auto-tick=${autoTickOvertime ? "ON" : "OFF"}, auto-confirm=${autoConfirmOvertime ? "ON" : "OFF"}`
         );
       } catch (err) {
         if (String(err?.message) === "STOP_REQUESTED") {
@@ -715,6 +875,6 @@
     });
   }
 
-  if (document.getElementById("agt-tt-auto-entry-widget")) return;
+  if (document.getElementById("agt-tt-month-to-today-widget")) return;
   setTimeout(createWidget, 600);
 })();
