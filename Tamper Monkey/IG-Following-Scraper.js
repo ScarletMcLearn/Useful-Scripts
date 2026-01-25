@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         IG Following Hover Scraper (modal -> CSV) v1.2
+// @name         IG Following Hover Scraper (modal -> CSV) v1.3
 // @namespace    https://tampermonkey.net/
-// @version      1.2.0
+// @version      1.3.0
 // @description  Scrape posts/followers/following from hover cards in Following modal and export CSV.
 // @match        https://www.instagram.com/YOUR_USERNAME/following/*
 // @match        https://www.instagram.com/YOUR_USERNAME/following/
@@ -20,27 +20,29 @@
     minDelayMs: 450,
     maxDelayMs: 900,
     scrollStepFactor: 0.85,
-    stallLoopsToStop: 10
+
+    // New: never auto-stop on slow loading
+    stallWarnEvery: 6,          // log a message every N stall loops
+    baseStallWaitMs: 1200,      // starting wait when IG is slow
+    stallWaitGrowthMs: 800,     // add this per stall loop
+    maxStallWaitMs: 20000,      // cap the wait
+    bottomJiggleEvery: 10       // every N stall loops, jiggle scroll to trigger loading
   };
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const jitter = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
   const now = () => new Date().toISOString().replace("T", " ").replace("Z", "");
-
   function log(msg) { UI.appendLog(`[${now()}] ${msg}`); }
 
   function parseCompactNumber(raw) {
     if (raw == null) return null;
     const s0 = String(raw).trim();
     if (!s0) return null;
-
     const s = s0.replace(/,/g, "").replace(/\s+/g, "").toLowerCase();
     const m = s.match(/^(\d+(\.\d+)?)([kmb])?$/i);
     if (!m) return null;
-
     const num = Number(m[1]);
     if (!Number.isFinite(num)) return null;
-
     const suf = (m[3] || "").toLowerCase();
     const mult = suf === "k" ? 1e3 : suf === "m" ? 1e6 : suf === "b" ? 1e9 : 1;
     return Math.round(num * mult);
@@ -57,11 +59,10 @@
     if (!href) return null;
     const m = String(href).trim().match(/^\/([A-Za-z0-9._]+)\/?$/);
     if (!m) return null;
-
     const u = m[1];
     const bad = new Set([
-      "explore", "accounts", "reels", "reel", "p", "stories", "direct", "tv", "about",
-      "privacy", "terms", "developers", "api", "oauth", "challenge"
+      "explore","accounts","reels","reel","p","stories","direct","tv","about",
+      "privacy","terms","developers","api","oauth","challenge"
     ]);
     if (bad.has(u.toLowerCase())) return null;
     return u;
@@ -90,7 +91,9 @@
 
   function findFollowingDialog() {
     const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
-    const withSearch = dialogs.find(d => d.querySelector('input[placeholder="Search"]') && /Following/i.test(d.innerText || ""));
+    const withSearch = dialogs.find(d =>
+      d.querySelector('input[placeholder="Search"]') && /Following/i.test(d.innerText || "")
+    );
     if (withSearch) return withSearch;
     return dialogs.find(d => /Following/i.test(d.innerText || "")) || null;
   }
@@ -110,7 +113,6 @@
   function getUserLinks(dialog) {
     if (!dialog) return [];
     const anchors = Array.from(dialog.querySelectorAll('a[href^="/"]'));
-
     const out = [];
     const seen = new Set();
 
@@ -128,13 +130,8 @@
       if (seen.has(key)) continue;
       seen.add(key);
 
-      out.push({
-        a,
-        username,
-        profileUrl: new URL(href, location.origin).toString()
-      });
+      out.push({ a, username, profileUrl: new URL(href, location.origin).toString() });
     }
-
     return out;
   }
 
@@ -155,12 +152,17 @@
     return null;
   }
 
+  function isModalLoading(dialog) {
+    if (!dialog) return false;
+    // seen in your HTML: data-visualcompletion="loading-state" role="progressbar"
+    return !!dialog.querySelector('[role="progressbar"], [data-visualcompletion="loading-state"], svg[aria-label="Loading..."]');
+  }
+
   function findHoverCard() {
     const candidates = [
       ...Array.from(document.querySelectorAll('div[role="tooltip"]')),
       ...Array.from(document.querySelectorAll('div[style*="transform"]'))
     ];
-
     for (let i = candidates.length - 1; i >= 0; i--) {
       const d = candidates[i];
       const txt = (d.innerText || "").toLowerCase();
@@ -209,20 +211,16 @@
       composed: true,
       clientX: Math.round(rect.left + rect.width / 2),
       clientY: Math.round(rect.top + rect.height / 2)
-      // IMPORTANT: do NOT set `view`
     };
     try {
       el.dispatchEvent(new MouseEvent(type, opts));
     } catch {
-      // Fallback if MouseEvent is blocked
       el.dispatchEvent(new Event(type, { bubbles: true, cancelable: true, composed: true }));
     }
   }
 
   async function hoverAndReadCounts(usernameAnchor, { timeoutMs = 6000 } = {}) {
     const row = findRowContainerFromUsernameAnchor(usernameAnchor);
-
-    // Prefer hovering profile image
     const img = row.querySelector('img[alt*="profile picture"]');
     const target = img || usernameAnchor;
 
@@ -238,12 +236,11 @@
     }
 
     const counts = parseCountsFromHoverCard(card);
-
     fireMouse(target, "mouseout");
     return { ...counts, ok: true };
   }
 
-  const STATE_KEY = "IG_FOLLOWING_SCRAPER_STATE_V12";
+  const STATE_KEY = "IG_FOLLOWING_SCRAPER_STATE_V13";
 
   const Runner = {
     running: false,
@@ -277,9 +274,7 @@
       }
     },
 
-    clearState() {
-      GM_setValue(STATE_KEY, "");
-    },
+    clearState() { GM_setValue(STATE_KEY, ""); },
 
     async ensureModalOpen() {
       let dlg = findFollowingDialog();
@@ -287,13 +282,11 @@
 
       const a = findFollowingCountAnchor();
       if (!a) throw new Error("Could not find Following link/anchor.");
-
       log("Opening Following modal...");
       a.click();
 
       dlg = await waitFor(() => findFollowingDialog(), { timeoutMs: 12000, pollMs: 200 });
       if (!dlg) throw new Error("Following modal did not appear.");
-
       return dlg;
     },
 
@@ -341,8 +334,8 @@
       document.body.appendChild(a);
       a.click();
       a.remove();
-
       setTimeout(() => URL.revokeObjectURL(url), 5000);
+
       log(`CSV exported (${rows.length} rows).`);
     },
 
@@ -357,7 +350,7 @@
         this.total = total;
         log(`Total following detected: ${total}`);
       } else {
-        log("Could not read total following count. Will run until list stalls.");
+        log("Could not read total following count. Will run indefinitely until manual Stop.");
       }
 
       const dlg = await this.ensureModalOpen();
@@ -365,7 +358,7 @@
       const ready = await waitFor(() => {
         const list = getUserLinks(dlg);
         return list.length ? list : null;
-      }, { timeoutMs: 15000, pollMs: 250 });
+      }, { timeoutMs: 20000, pollMs: 250 });
 
       if (!ready) throw new Error("No user rows found in modal (still loading or selectors changed).");
 
@@ -379,7 +372,8 @@
       log(`Modal ready. Found scroll container (clientHeight=${this.scrollEl.clientHeight}).`);
 
       let stallLoops = 0;
-      let lastUnique = this.processed.size;
+      let lastProcessed = this.processed.size;
+      let lastDomUsers = getUserLinks(dlg).length;
 
       while (!this.stopRequested) {
         while (this.paused && !this.stopRequested) {
@@ -390,20 +384,22 @@
         UI.setStatus("Running");
 
         if (this.total && this.processed.size >= this.total) {
-          log("Reached total following count. Finishing...");
+          log("Reached total following snapshot. Finishing...");
           break;
         }
 
         const links = getUserLinks(dlg);
         const todo = links.filter(u => !this.processed.has(u.username));
-
         const batch = todo.slice(0, CONFIG.batchSize);
+
+        if (batch.length) {
+          stallLoops = 0; // we have fresh work
+        }
 
         for (const u of batch) {
           if (this.stopRequested) break;
           while (this.paused && !this.stopRequested) await sleep(250);
 
-          // Mark processed early to avoid dupes if DOM shifts
           this.processed.add(u.username);
           UI.setProgress(this.processed.size, this.total);
 
@@ -429,22 +425,56 @@
           await sleep(jitter(CONFIG.minDelayMs, CONFIG.maxDelayMs));
         }
 
-        // Scroll down a step
+        // Scroll for more users
         const step = Math.max(200, Math.floor(this.scrollEl.clientHeight * CONFIG.scrollStepFactor));
         this.scrollEl.scrollTop = this.scrollEl.scrollTop + step;
 
-        await sleep(jitter(900, 1400));
+        // Wait a bit (and longer if IG shows a spinner)
+        let baseWait = jitter(900, 1400);
+        await sleep(baseWait);
 
-        if (this.processed.size === lastUnique) stallLoops += 1;
-        else {
+        // Update stall logic: NEVER stop automatically, just back off and keep trying
+        const domUsersNow = getUserLinks(dlg).length;
+        const processedNow = this.processed.size;
+
+        const noProgress = (processedNow === lastProcessed);
+        const noNewDomUsers = (domUsersNow === lastDomUsers);
+
+        if (noProgress && (todo.length === 0 || noNewDomUsers)) {
+          stallLoops += 1;
+
+          // If modal is still loading, just wait more (don’t count as “failure”)
+          const loading = isModalLoading(dlg);
+
+          let extraWait = Math.min(
+            CONFIG.maxStallWaitMs,
+            CONFIG.baseStallWaitMs + (stallLoops * CONFIG.stallWaitGrowthMs)
+          );
+
+          if (loading) extraWait = Math.min(CONFIG.maxStallWaitMs, extraWait + 2500);
+
+          if (stallLoops % CONFIG.stallWarnEvery === 0) {
+            log(`Waiting for more users to load... (stallLoops=${stallLoops}, wait=${Math.round(extraWait/1000)}s${loading ? ", loading..." : ""})`);
+          }
+
+          // Occasionally jiggle to trigger load
+          if (stallLoops % CONFIG.bottomJiggleEvery === 0) {
+            // jump to bottom, then slightly up, then bottom again
+            this.scrollEl.scrollTop = this.scrollEl.scrollHeight;
+            await sleep(700);
+            this.scrollEl.scrollTop = Math.max(0, this.scrollEl.scrollTop - Math.floor(this.scrollEl.clientHeight * 0.6));
+            await sleep(700);
+            this.scrollEl.scrollTop = this.scrollEl.scrollHeight;
+            await sleep(700);
+          }
+
+          await sleep(extraWait);
+        } else {
           stallLoops = 0;
-          lastUnique = this.processed.size;
         }
 
-        if (stallLoops >= CONFIG.stallLoopsToStop) {
-          log("Stalled: no new users detected after multiple scroll loops. Stopping.");
-          break;
-        }
+        lastProcessed = processedNow;
+        lastDomUsers = domUsersNow;
       }
 
       this.running = false;
@@ -459,6 +489,7 @@
     }
   };
 
+  // UI
   GM_addStyle(`
     #igfs_panel {
       position: fixed; right: 14px; bottom: 14px; z-index: 999999;
@@ -494,7 +525,7 @@
     panel.innerHTML = `
       <div id="igfs_title">
         <div>IG Following Scraper</div>
-        <div style="font-size:11px;opacity:.75">v1.2</div>
+        <div style="font-size:11px;opacity:.75">v1.3</div>
       </div>
       <div id="igfs_status">Status: <b id="igfs_status_val">Idle</b></div>
 
