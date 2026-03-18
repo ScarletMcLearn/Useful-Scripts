@@ -86,15 +86,18 @@
         return getMode() === "expand" ? "Expand" : "Contract";
     }
 
-    function loadUiState() {
-        try {
-            isMinimized = localStorage.getItem(STORAGE_KEY_MINIMIZED) === "1";
-            isHidden = localStorage.getItem(STORAGE_KEY_HIDDEN) === "1";
-        } catch (_) {
-            isMinimized = false;
-            isHidden = false;
-        }
+function loadUiState() {
+    try {
+        const savedMinimized = localStorage.getItem(STORAGE_KEY_MINIMIZED);
+        const savedHidden = localStorage.getItem(STORAGE_KEY_HIDDEN);
+
+        isMinimized = savedMinimized === null ? true : savedMinimized === "1";
+        isHidden = savedHidden === "1";
+    } catch (_) {
+        isMinimized = true;
+        isHidden = false;
     }
+}
 
     function saveUiState() {
         try {
