@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Notion Expand / Contract Widget
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      5.0
 // @description  Expand or contract Notion toggle blocks from a bottom-right widget
 // @match        https://www.notion.so/*
 // @match        https://*.notion.so/*
@@ -14,12 +14,21 @@
     "use strict";
 
     const ROOT_ID = "tm-notion-toggle-widget-root";
+    const OPEN_BTN_ID = "tm-notion-toggle-widget-open";
+    const STORAGE_KEY_MINIMIZED = "tmNotionWidgetMinimized";
+    const STORAGE_KEY_HIDDEN = "tmNotionWidgetHidden";
+
     let rootEl = null;
+    let openBtnEl = null;
+    let headerRowEl = null;
+    let contentWrapEl = null;
     let modeLabelEl = null;
     let modeToggleEl = null;
     let startBtnEl = null;
     let observer = null;
     let isRunning = false;
+    let isMinimized = false;
+    let isHidden = false;
 
     function wait(ms) {
         return new Promise((resolve) => setTimeout(resolve, ms));
@@ -77,6 +86,23 @@
         return getMode() === "expand" ? "Expand" : "Contract";
     }
 
+    function loadUiState() {
+        try {
+            isMinimized = localStorage.getItem(STORAGE_KEY_MINIMIZED) === "1";
+            isHidden = localStorage.getItem(STORAGE_KEY_HIDDEN) === "1";
+        } catch (_) {
+            isMinimized = false;
+            isHidden = false;
+        }
+    }
+
+    function saveUiState() {
+        try {
+            localStorage.setItem(STORAGE_KEY_MINIMIZED, isMinimized ? "1" : "0");
+            localStorage.setItem(STORAGE_KEY_HIDDEN, isHidden ? "1" : "0");
+        } catch (_) {}
+    }
+
     function updateModeLabel() {
         if (modeLabelEl) {
             modeLabelEl.textContent = getModeText();
@@ -101,11 +127,10 @@
             if (!isVisible(el)) continue;
             if (isInChrome(el)) continue;
             if (rootEl && rootEl.contains(el)) continue;
+            if (openBtnEl && openBtnEl.contains(el)) continue;
 
             const rect = el.getBoundingClientRect();
             if (rect.width < 10 || rect.height < 10) continue;
-
-            // Avoid most sidebar items on desktop
             if (rect.left < 120) continue;
 
             result.push(el);
@@ -115,13 +140,11 @@
             const ra = a.getBoundingClientRect();
             const rb = b.getBoundingClientRect();
 
-            // Expand: top -> bottom
             if (getMode() === "expand") {
                 if (Math.abs(ra.top - rb.top) > 2) return ra.top - rb.top;
                 return ra.left - rb.left;
             }
 
-            // Contract: bottom -> top
             if (Math.abs(ra.top - rb.top) > 2) return rb.top - ra.top;
             return rb.left - ra.left;
         });
@@ -226,7 +249,6 @@
             if (el.getAttribute("aria-expanded") === targetState) return true;
         }
 
-        // Keyboard fallback
         for (const target of targets) {
             try { target.focus(); } catch (_) {}
 
@@ -286,8 +308,10 @@
                 await wait(250);
             }
 
-           setStartButtonText(totalChanged > 0 ? `${actionText}ed ${totalChanged}` : `No ${actionText.toLowerCase()} items`);
-await wait(900);
+            setStartButtonText(
+                totalChanged > 0 ? `${getModeText()}ed ${totalChanged}` : `No ${getModeText().toLowerCase()} items`
+            );
+            await wait(900);
         } finally {
             isRunning = false;
             setStartButtonText("Start");
@@ -354,6 +378,117 @@ await wait(900);
         return { wrap, input };
     }
 
+    function makeIconButton(label, title) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = label;
+        btn.title = title;
+        Object.assign(btn.style, {
+            border: "none",
+            background: "transparent",
+            color: "#fff",
+            cursor: "pointer",
+            fontSize: "16px",
+            lineHeight: "1",
+            padding: "2px 6px",
+            borderRadius: "6px",
+            opacity: "0.9"
+        });
+
+        btn.addEventListener("mouseenter", () => {
+            btn.style.background = "rgba(255,255,255,0.12)";
+        });
+
+        btn.addEventListener("mouseleave", () => {
+            btn.style.background = "transparent";
+        });
+
+        return btn;
+    }
+
+    function minimizeWidget() {
+        isMinimized = true;
+        isHidden = false;
+        saveUiState();
+        applyWidgetState();
+    }
+
+    function expandWidget() {
+        isMinimized = false;
+        isHidden = false;
+        saveUiState();
+        applyWidgetState();
+    }
+
+    function hideWidget() {
+        isHidden = true;
+        isMinimized = false;
+        saveUiState();
+        applyWidgetState();
+    }
+
+    function showWidget() {
+        isHidden = false;
+        isMinimized = false;
+        saveUiState();
+        applyWidgetState();
+    }
+
+    function applyWidgetState() {
+        if (!rootEl || !openBtnEl || !contentWrapEl) return;
+
+        if (isHidden) {
+            rootEl.style.display = "none";
+            openBtnEl.style.display = "block";
+            return;
+        }
+
+        openBtnEl.style.display = "none";
+        rootEl.style.display = "block";
+
+        if (isMinimized) {
+            contentWrapEl.style.display = "none";
+            rootEl.style.minWidth = "auto";
+            rootEl.style.padding = "10px 12px";
+        } else {
+            contentWrapEl.style.display = "block";
+            rootEl.style.minWidth = "220px";
+            rootEl.style.padding = "12px";
+        }
+    }
+
+    function createOpenButton() {
+        const existing = document.getElementById(OPEN_BTN_ID);
+        if (existing) {
+            openBtnEl = existing;
+            return;
+        }
+
+        openBtnEl = document.createElement("button");
+        openBtnEl.id = OPEN_BTN_ID;
+        openBtnEl.textContent = "Open";
+        Object.assign(openBtnEl.style, {
+            position: "fixed",
+            right: "20px",
+            bottom: "20px",
+            zIndex: "2147483647",
+            border: "none",
+            borderRadius: "999px",
+            padding: "10px 14px",
+            background: "rgba(17,17,17,0.96)",
+            color: "#fff",
+            cursor: "pointer",
+            boxShadow: "0 6px 18px rgba(0,0,0,0.28)",
+            fontFamily: "Inter, Arial, sans-serif",
+            fontSize: "14px",
+            fontWeight: "600",
+            display: "none"
+        });
+
+        openBtnEl.addEventListener("click", showWidget);
+        document.body.appendChild(openBtnEl);
+    }
+
     function createWidget() {
         const existing = document.getElementById(ROOT_ID);
         if (existing) {
@@ -361,6 +496,8 @@ await wait(900);
             modeLabelEl = rootEl.querySelector('[data-role="mode-label"]');
             modeToggleEl = rootEl.querySelector('[data-role="mode-toggle"]');
             startBtnEl = rootEl.querySelector('[data-role="start-btn"]');
+            headerRowEl = rootEl.querySelector('[data-role="header-row"]');
+            contentWrapEl = rootEl.querySelector('[data-role="content-wrap"]');
             return;
         }
 
@@ -372,7 +509,7 @@ await wait(900);
             right: "20px",
             bottom: "20px",
             zIndex: "2147483647",
-            minWidth: "180px",
+            minWidth: "220px",
             background: "rgba(17,17,17,0.96)",
             color: "#fff",
             borderRadius: "12px",
@@ -382,6 +519,57 @@ await wait(900);
             fontSize: "14px",
             display: "none",
             userSelect: "none"
+        });
+
+        headerRowEl = document.createElement("div");
+        headerRowEl.setAttribute("data-role", "header-row");
+        Object.assign(headerRowEl.style, {
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "10px"
+        });
+
+        const titleEl = document.createElement("div");
+        titleEl.textContent = "Notion Toggle";
+        Object.assign(titleEl.style, {
+            fontWeight: "700",
+            fontSize: "14px"
+        });
+
+        const actionsEl = document.createElement("div");
+        Object.assign(actionsEl.style, {
+            display: "flex",
+            alignItems: "center",
+            gap: "4px"
+        });
+
+        const minimizeBtn = makeIconButton("–", "Minimize");
+        const hideBtn = makeIconButton("×", "Hide");
+        const restoreBtn = makeIconButton("□", "Expand widget");
+
+        minimizeBtn.addEventListener("click", () => {
+            if (isMinimized) {
+                expandWidget();
+            } else {
+                minimizeWidget();
+            }
+        });
+
+        restoreBtn.addEventListener("click", expandWidget);
+        hideBtn.addEventListener("click", hideWidget);
+
+        actionsEl.appendChild(minimizeBtn);
+        actionsEl.appendChild(restoreBtn);
+        actionsEl.appendChild(hideBtn);
+
+        headerRowEl.appendChild(titleEl);
+        headerRowEl.appendChild(actionsEl);
+
+        contentWrapEl = document.createElement("div");
+        contentWrapEl.setAttribute("data-role", "content-wrap");
+        Object.assign(contentWrapEl.style, {
+            marginTop: "10px"
         });
 
         const topRow = document.createElement("div");
@@ -436,30 +624,33 @@ await wait(900);
             await runAction();
         });
 
-        rootEl.appendChild(topRow);
-        rootEl.appendChild(startBtnEl);
+        contentWrapEl.appendChild(topRow);
+        contentWrapEl.appendChild(startBtnEl);
+
+        rootEl.appendChild(headerRowEl);
+        rootEl.appendChild(contentWrapEl);
         document.body.appendChild(rootEl);
     }
 
-  function updateWidgetVisibility() {
-    if (!rootEl) return;
+    function updateWidgetVisibility() {
+        if (!rootEl) return;
 
-    rootEl.style.display = "block";
+        const count = getActionableCandidates().length;
+        const modeText = getModeText();
 
-    const count = getActionableCandidates().length;
-    const modeText = getModeText();
+        if (modeLabelEl) {
+            modeLabelEl.textContent = modeText;
+        }
 
-    if (modeLabelEl) {
-        modeLabelEl.textContent = modeText;
+        if (!isRunning && startBtnEl) {
+            startBtnEl.textContent = count > 0 ? `Start (${count})` : "Start";
+            startBtnEl.disabled = false;
+            startBtnEl.style.cursor = "pointer";
+            startBtnEl.style.opacity = "1";
+        }
+
+        applyWidgetState();
     }
-
-    if (!isRunning && startBtnEl) {
-        startBtnEl.textContent = count > 0 ? `Start (${count})` : "Start";
-        startBtnEl.disabled = false;
-        startBtnEl.style.cursor = "pointer";
-        startBtnEl.style.opacity = "1";
-    }
-}
 
     function initObserver() {
         if (observer) observer.disconnect();
@@ -485,6 +676,8 @@ await wait(900);
     function init() {
         if (!isNotionPage()) return;
 
+        loadUiState();
+        createOpenButton();
         createWidget();
         initObserver();
 
