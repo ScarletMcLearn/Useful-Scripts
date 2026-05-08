@@ -1,10 +1,14 @@
 // ==UserScript==
 // @name         NuComply Control Testing Bulk Pass/Fail/Comment/Save Background Tolerant
 // @namespace    nucomply-control-testing
-// @version      2.5.0
-// @description  Bulk select Pass, Fail, or Unselect. Add optional BD timestamp comment and save rows. Best-effort support when switching tabs/windows.
+// @version      2.5.1
+// @description  Bulk select Pass, Fail, or Unselect. Add optional BD timestamp comment and save rows.
 // @match        https://app.nucomply.com/compliance/control-testing/check-result*
+// @match        https://app.nucomply.com/compliance/control-testing/run-details*
 // @match        https://qa-app.nucomply.com/compliance/control-testing/check-result*
+// @match        https://qa-app.nucomply.com/compliance/control-testing/run-details*
+// @match        https://staging-app.nucomply.com/compliance/control-testing/check-result*
+// @match        https://staging-app.nucomply.com/compliance/control-testing/run-details*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
@@ -761,15 +765,22 @@
     if (status) status.textContent = message;
   }
 
-  function init() {
-    const allowedPath = "/compliance/control-testing/check-result";
+function init() {
+  const allowedPaths = [
+    "/compliance/control-testing/check-result",
+    "/compliance/control-testing/run-details",
+  ];
 
-    if (!window.location.pathname.startsWith(allowedPath)) {
-      return;
-    }
+  const isAllowedPath = allowedPaths.some((allowedPath) =>
+    window.location.pathname.startsWith(allowedPath)
+  );
 
-    createWidget();
+  if (!isAllowedPath) {
+    return;
   }
+
+  createWidget();
+}
 
   init();
 
