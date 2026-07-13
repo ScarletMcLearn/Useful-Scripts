@@ -1,0 +1,31 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh.exe -NoLogo -NoProfile -NonInteractive -Command \"& (Join-Path $HOME '.config\\agent-notify\\Send-AgentNotification.ps1') -Agent 'Codex' -Status 'Completed' -UseHookInput -HookOutput\"",
+            "commandWindows": "pwsh.exe -NoLogo -NoProfile -NonInteractive -Command \"& (Join-Path $HOME '.config\\agent-notify\\Send-AgentNotification.ps1') -Agent 'Codex' -Status 'Completed' -UseHookInput -HookOutput\"",
+            "timeout": 15,
+            "statusMessage": "Sending completion notification"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh.exe -NoLogo -NoProfile -NonInteractive -Command \"& (Join-Path $HOME '.config\\agent-notify\\Send-AgentNotification.ps1') -Agent 'Codex' -Status 'ActionRequired' -Message 'Codex is waiting for approval.'\"",
+            "commandWindows": "pwsh.exe -NoLogo -NoProfile -NonInteractive -Command \"& (Join-Path $HOME '.config\\agent-notify\\Send-AgentNotification.ps1') -Agent 'Codex' -Status 'ActionRequired' -Message 'Codex is waiting for approval.'\"",
+            "timeout": 15,
+            "statusMessage": "Sending approval notification"
+          }
+        ]
+      }
+    ]
+  }
+}

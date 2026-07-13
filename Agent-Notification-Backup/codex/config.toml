@@ -1,0 +1,220 @@
+model = "gpt-5.5"
+model_reasoning_effort = "low"
+
+
+
+personality = "pragmatic"
+
+
+model_verbosity = "low"
+model_reasoning_summary = "concise"
+plan_mode_reasoning_effort = "medium"
+service_tier = "default"
+model_auto_compact_token_limit = 100000
+model_auto_compact_token_limit_scope = "total"
+project_doc_max_bytes = 20000
+
+
+
+notify = [ "C:\\Users\\getra\\AppData\\Local\\OpenAI\\Codex\\runtimes\\cua_node\\ecfc0d9aa02807e3\\bin\\node_modules\\@oai\\sky\\bin\\windows\\codex-computer-use.exe", "turn-ended" ]
+[features]
+multi_agent = true
+memories = true
+chronicle = false
+js_repl = false
+
+
+
+[windows]
+sandbox = "unelevated"
+
+[projects.'I:\Projects\Automation\BWL-E2E\1\BWL-E2E-ABA']
+trust_level = "trusted"
+
+[projects.'i:\projects\automation\agt-portal\1']
+trust_level = "trusted"
+
+[projects.'i:\projects\automation\alpha\ael-ez-ma\1\auxo-ael-shams']
+trust_level = "trusted"
+
+[projects.'i:\projects\automation\rtz\linkedin\jobscraper\1']
+trust_level = "trusted"
+
+[projects.'i:\projects\automation\mt\rbac-api-tests\1']
+trust_level = "trusted"
+
+[projects.'i:\projects\automation\alpha\ael-perf\1\ael-locust']
+trust_level = "trusted"
+
+[projects.'i:\projects\full-stack\tqtech\1\tqtech-assessment-wip']
+trust_level = "trusted"
+
+[projects.'i:\projects\automation\ael-postman\1\ael-collections']
+trust_level = "trusted"
+
+[projects.'i:\projects\full-stack\testpod\2\testing']
+trust_level = "trusted"
+
+[projects.'i:\projects\automation\templates\perf-api-locust\1\python-locust-framework']
+trust_level = "trusted"
+
+[projects.'i:\projects\automation\templates\api-perf-e2e-pw-locust\1\playwright-locust-automation-template']
+trust_level = "trusted"
+
+[projects.'i:\projects\data-science\email generator\1']
+trust_level = "trusted"
+
+[projects.'i:\projects\automation\templates\swagger-redocly\1\redocly-template']
+trust_level = "trusted"
+
+[projects.'c:\users\getra\onedrive\ドキュメント\new project']
+trust_level = "trusted"
+
+[projects.'i:\projects\automation\templates\schemathesis\1\schemathesis-template']
+trust_level = "trusted"
+
+[projects.'i:\projects\full-stack\openmask\1\openmask']
+trust_level = "trusted"
+
+[projects.'c:\users\getra']
+trust_level = "trusted"
+
+[projects.'c:\users\getra\documents\codex\2026-07-05\you-are-working-on-my-local']
+trust_level = "trusted"
+
+[projects.'c:\users\getra\documents\codex']
+trust_level = "trusted"
+
+[projects.'i:\projects\full-stack\portfolio']
+trust_level = "trusted"
+
+[projects.'i:\projects\automation\alpha\sse\1']
+trust_level = "trusted"
+
+[projects.'c:\windows\system32']
+trust_level = "trusted"
+
+[plugins."build-web-apps@openai-curated"]
+enabled = true
+
+[plugins."github@openai-curated"]
+enabled = true
+
+[plugins."coderabbit@openai-curated"]
+enabled = true
+
+[plugins."render@openai-curated"]
+enabled = false
+
+[plugins."canva@openai-curated"]
+enabled = true
+
+[plugins."documents@openai-primary-runtime"]
+enabled = true
+
+[plugins."spreadsheets@openai-primary-runtime"]
+enabled = true
+
+[plugins."presentations@openai-primary-runtime"]
+enabled = true
+
+[plugins."pdf@openai-primary-runtime"]
+enabled = true
+
+[plugins."template-creator@openai-primary-runtime"]
+enabled = true
+
+[plugins."sites@openai-bundled"]
+enabled = true
+
+[plugins."visualize@openai-bundled"]
+enabled = true
+
+[plugins."chrome@openai-bundled"]
+enabled = true
+
+[plugins."computer-use@openai-bundled"]
+enabled = true
+
+[plugins."browser@openai-bundled"]
+enabled = true
+
+[marketplaces.openai-bundled]
+last_updated = "2026-07-13T17:37:40Z"
+source_type = "local"
+source = '\\?\C:\Users\getra\.codex\.tmp\bundled-marketplaces\openai-bundled'
+
+[marketplaces.openai-primary-runtime]
+last_updated = "2026-07-12T12:30:35Z"
+source_type = "local"
+source = '\\?\C:\Users\getra\.cache\codex-runtimes\codex-primary-runtime\plugins\openai-primary-runtime'
+
+[desktop]
+appearanceTheme = "dark"
+appearanceDarkCodeThemeId = "github"
+usePointerCursors = true
+localeOverride = "en-US"
+notifications-turn-mode = "always"
+conversationDetailMode = "STEPS_EXECUTION"
+composerEnterBehavior = "cmdIfMultiline"
+followUpQueueMode = "queue"
+show-context-window-usage = true
+git-show-sidebar-pr-icons = true
+avatar-overlay-mascot-width-px = 80
+enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "ultra", "max"]
+
+[desktop.appearanceDarkChromeTheme]
+accent = "#1f6feb"
+contrast = 60
+ink = "#e6edf3"
+opaqueWindows = true
+surface = "#0d1117"
+
+[desktop.appearanceDarkChromeTheme.fonts]
+
+[desktop.appearanceDarkChromeTheme.semanticColors]
+diffAdded = "#3fb950"
+diffRemoved = "#f85149"
+skill = "#bc8cff"
+
+[desktop.open-in-target-preferences]
+global = "githubDesktop"
+
+[desktop.open-in-target-preferences.perPath]
+'I:\Projects\Automation\Alpha\AEL-Perf\1\ael-locust' = "githubDesktop"
+
+[memories]
+generate_memories = true
+use_memories = true
+
+[mcp_servers.node_repl]
+args = []
+command = 'C:\Users\getra\AppData\Local\OpenAI\Codex\runtimes\cua_node\ecfc0d9aa02807e3\bin\node_repl.exe'
+startup_timeout_sec = 120
+
+[mcp_servers.node_repl.env]
+NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS = "1000"
+NODE_REPL_NODE_MODULE_DIRS = 'C:\Users\getra\AppData\Local\OpenAI\Codex\runtimes\cua_node\ecfc0d9aa02807e3\bin\node_modules'
+NODE_REPL_NODE_PATH = 'C:\Users\getra\AppData\Local\OpenAI\Codex\runtimes\cua_node\ecfc0d9aa02807e3\bin\node.exe'
+NODE_REPL_TRUSTED_CODE_PATHS = 'C:\Users\getra\.codex'
+CODEX_HOME = 'C:\Users\getra\.codex'
+NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "7ed52dae165c3bc22b6d24f282e2c1fbc87f6949fbbe037767a7418d8f517f01,c8b7e809d7cf9e20a57123b2530d476ccec9a01a6230a7b2b924fea7d94d7f4a"
+BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"
+NODE_REPL_INSTRUCTIONS_USE_CASE_BROWSER = "Control the in-app browser in conjunction with the Browser Plugin."
+NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME = "Control the Chrome browser in conjunction with the Chrome Plugin. Prefer this method of controlling Chrome over alternatives (such as Computer Use) unless the user explicitly mentions an alternative."
+BROWSER_USE_CODEX_APP_BUILD_FLAVOR = "prod"
+BROWSER_USE_CODEX_APP_VERSION = "26.707.31428"
+SKY_CUA_NATIVE_PIPE = "1"
+SKY_CUA_NATIVE_PIPE_DIRECTORY = '\\.\pipe\codex-computer-use-f0caaba8-6b21-47f5-8a18-005718180d49'
+CODEX_CLI_PATH = 'C:\Users\getra\AppData\Local\OpenAI\Codex\bin\a7c12ebff69fb123\codex.exe'
+
+[tui.model_availability_nux]
+"gpt-5.5" = 3
+
+[hooks.state]
+
+[hooks.state.'C:\Users\getra\.codex\hooks.json:permission_request:0:0']
+trusted_hash = "sha256:c378d1180a4dd817a96833dc8a0a38d047b2a611472342c8bee654c71fa1b1f7"
+
+[hooks.state.'C:\Users\getra\.codex\hooks.json:stop:0:0']
+trusted_hash = "sha256:9cdc4004b9d1915f30abd898667541ceb5e7d52df5037b8aac9a9128e6d260ac"
