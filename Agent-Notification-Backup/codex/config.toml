@@ -1,5 +1,5 @@
 model = "gpt-5.5"
-model_reasoning_effort = "low"
+model_reasoning_effort = "medium"
 
 
 
@@ -16,7 +16,6 @@ project_doc_max_bytes = 20000
 
 
 
-notify = [ "C:\\Users\\getra\\AppData\\Local\\OpenAI\\Codex\\runtimes\\cua_node\\ecfc0d9aa02807e3\\bin\\node_modules\\@oai\\sky\\bin\\windows\\codex-computer-use.exe", "turn-ended" ]
 [features]
 multi_agent = true
 memories = true
@@ -140,7 +139,7 @@ enabled = true
 enabled = true
 
 [marketplaces.openai-bundled]
-last_updated = "2026-07-13T17:37:40Z"
+last_updated = "2026-07-15T13:56:51Z"
 source_type = "local"
 source = '\\?\C:\Users\getra\.codex\.tmp\bundled-marketplaces\openai-bundled'
 
@@ -198,15 +197,15 @@ NODE_REPL_NODE_MODULE_DIRS = 'C:\Users\getra\AppData\Local\OpenAI\Codex\runtimes
 NODE_REPL_NODE_PATH = 'C:\Users\getra\AppData\Local\OpenAI\Codex\runtimes\cua_node\ecfc0d9aa02807e3\bin\node.exe'
 NODE_REPL_TRUSTED_CODE_PATHS = 'C:\Users\getra\.codex'
 CODEX_HOME = 'C:\Users\getra\.codex'
-NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "7ed52dae165c3bc22b6d24f282e2c1fbc87f6949fbbe037767a7418d8f517f01,c8b7e809d7cf9e20a57123b2530d476ccec9a01a6230a7b2b924fea7d94d7f4a"
+NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "7ed52dae165c3bc22b6d24f282e2c1fbc87f6949fbbe037767a7418d8f517f01,e2cad16d8d9f60f09c9f0951ec7dfdd9e8f59dedd06045c0b6827dc8fa8322f0"
 BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"
 NODE_REPL_INSTRUCTIONS_USE_CASE_BROWSER = "Control the in-app browser in conjunction with the Browser Plugin."
 NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME = "Control the Chrome browser in conjunction with the Chrome Plugin. Prefer this method of controlling Chrome over alternatives (such as Computer Use) unless the user explicitly mentions an alternative."
 BROWSER_USE_CODEX_APP_BUILD_FLAVOR = "prod"
-BROWSER_USE_CODEX_APP_VERSION = "26.707.31428"
+BROWSER_USE_CODEX_APP_VERSION = "26.707.62119"
 SKY_CUA_NATIVE_PIPE = "1"
-SKY_CUA_NATIVE_PIPE_DIRECTORY = '\\.\pipe\codex-computer-use-f0caaba8-6b21-47f5-8a18-005718180d49'
-CODEX_CLI_PATH = 'C:\Users\getra\AppData\Local\OpenAI\Codex\bin\a7c12ebff69fb123\codex.exe'
+SKY_CUA_NATIVE_PIPE_DIRECTORY = '\\.\pipe\codex-computer-use-3f6d7727-e90f-4f19-90d1-b00ad1623909'
+CODEX_CLI_PATH = 'C:\Users\getra\AppData\Local\OpenAI\Codex\bin\3135b80b111fd431\codex.exe'
 
 [tui.model_availability_nux]
 "gpt-5.5" = 3
